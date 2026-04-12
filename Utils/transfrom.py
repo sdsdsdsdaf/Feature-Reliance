@@ -348,43 +348,6 @@ class MixUp:
         return mixed, lam
 
 
-def get_dataset_statistics(dataset):
-    if dataset in ['imagenet', 'oxfordiiitpet', 'caltech101', 'flowers102', 'stl10', 'imagenet16']:
-        mean = [0.485, 0.456, 0.406]
-        std  = [0.229, 0.224, 0.225]
-    elif dataset == 'bloodmnist':
-        mean = [0.796, 0.659, 0.696]
-        std  = [0.226, 0.259, 0.096]
-    elif dataset == 'chestmnist':
-        mean = [0.497, 0.497, 0.497]
-        std  = [0.247, 0.247, 0.247]
-    elif dataset == 'dermamnist':
-        mean = [0.763, 0.538, 0.561]
-        std  = [0.136, 0.158, 0.176]
-    elif dataset == 'pathmnist':
-        mean = [0.740, 0.532, 0.705]
-        std  = [0.165, 0.217, 0.157]
-    elif dataset == 'retinamnist':
-        mean = [0.394, 0.241, 0.145]
-        std  = [0.323, 0.210, 0.151]
-    elif dataset == 'aid':
-        mean = [0.397, 0.408, 0.368]
-        std  = [0.216, 0.194, 0.191]
-    elif dataset == 'patternnet':
-        mean = [0.359, 0.360, 0.319]
-        std  = [0.195, 0.185, 0.178]
-    elif dataset == 'rsd46whu':
-        mean = [0.378, 0.419, 0.373]
-        std  = [0.207, 0.178, 0.171]
-    elif dataset == 'ucmerced':
-        mean = [0.483, 0.489, 0.450]
-        std  = [0.217, 0.201, 0.195]
-    elif dataset == 'deepglobe':
-        mean = [0.407, 0.380, 0.283]
-        std  = [0.150, 0.118, 0.108]
-    return mean, std
-
-
 def get_transform(
     train_augmentations: str,
     test_augmentations: str,
@@ -402,9 +365,13 @@ def get_transform(
     gaussian_k: Optional[int],
     gaussian_sigma: Optional[float],
     split: str = 'train',
-    dataset: str = None,
+    mean:float = None,
+    std:float = None,
     
 ) -> List[object]:
+    
+    if mean is mean or std is None:
+        raise ValueError("Mean and Std must be filled")
 
     transform_names = list(train_augmentations.split('_')) if split == 'train' else list(test_augmentations.split('_'))
     compose = []
@@ -453,9 +420,7 @@ def get_transform(
         if 'cutout' == transform_name:
             compose += [CutOut(p=p)]      
 
-    mean, std = get_dataset_statistics(dataset)
-
-    if dataset is not None:
-        compose += [transforms.ToTensor(), transforms.Normalize(mean, std)]
-
+        
+    compose += [transforms.ToTensor(), transforms.Normalize(mean, std)]
+        
     return transforms.Compose(compose)
