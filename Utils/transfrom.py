@@ -347,31 +347,98 @@ class MixUp:
         mixed = np.clip(mixed, 0, 255).astype(np.uint8) if img1.dtype == np.uint8 else mixed
         return mixed, lam
 
+class LocalWarping:
+    def __init__(
+        self,
+        alpha: float = 20.0,
+        sigma: float = 4.0,
+        p: float = 1.0,
+        border_mode: int = cv2.BORDER_REFLECT_101,
+    ):
+        self.alpha = alpha
+        self.sigma = sigma
+        self.p = p
+        self.border_mode = border_mode
+
+    def _build_displacement_field(self, h: int, w: int) -> Tuple[np.ndarray, np.ndarray]:
+        dx = np.random.randn(h, w).astype(np.float32)
+        dy = np.random.randn(h, w).astype(np.float32)
+
+        dx = cv2.GaussianBlur(dx, ksize=(0, 0), sigmaX=self.sigma, sigmaY=self.sigma)
+        dy = cv2.GaussianBlur(dy, ksize=(0, 0), sigmaX=self.sigma, sigmaY=self.sigma)
+
+        dx *= self.alpha
+        dy *= self.alpha
+
+        return dx, dy
+
+    def __call__(self, img: np.ndarray) -> np.ndarray:
+        if np.random.rand() > self.p:
+            return img
+
+        if img.ndim != 3:
+            raise ValueError(f"Expected image shape (H, W, C), got {img.shape}")
+
+        h, w = img.shape[:2]
+        dx, dy = self._build_displacement_field(h, w)
+
+        grid_x, grid_y = np.meshgrid(
+            np.arange(w, dtype=np.float32),
+            np.arange(h, dtype=np.float32)
+        )
+
+        map_x = grid_x + dx
+        map_y = grid_y + dy
+
+        warped = cv2.remap(
+            img,
+            map_x,
+            map_y,
+            interpolation=cv2.INTER_LINEAR,
+            borderMode=self.border_mode,
+        )
+
+        return warped
+
 
 def get_transform(
-    train_augmentations: str,
-    test_augmentations: str,
-    p: float,
-    p_list: Optional[List[int]],
-    resize_size: Optional[int],
-    grid_size: Optional[int],
-    gray_alpha: Optional[float],
-    bilateral_d: Optional[int],
-    sigma_color: Optional[int],
-    sigma_space: Optional[int],
-    nlmeans_h: Optional[int],
-    template_window_size: Optional[int],
-    search_window_size: Optional[int],
-    gaussian_k: Optional[int],
-    gaussian_sigma: Optional[float],
+    train_augmentations: str="",
+    test_augmentations: str="",
+    p: float=None,
+    p_list: Optional[List[int]]=None,
+    resize_size: Optional[int]=256,
+    grid_size: Optional[int]=None,
+    gray_alpha: Optional[float]=None,
+    bilateral_d: Optional[int]=None,
+    sigma_color: Optional[int]=None,
+    sigma_space: Optional[int]=None,
+    nlmeans_h: Optional[int]=None,
+    template_window_size: Optional[int]=None,
+    search_window_size: Optional[int]=None,
+    gaussian_k: Optional[int]=None,
+    gaussian_sigma: Optional[float]=None,
+    alpha_localwrap: Optional[float]=None,
+    sigma_localwrap: float = 4.0,
     split: str = 'train',
-    mean:float = None,
-    std:float = None,
+   
+    mean:tuple[float, float, float] = None,
+    std:tuple[float, float, float] = None,
     
-) -> List[object]:
+):
+    if split not in {"train", "test", "val"}:
+        raise ValueError("split must be either 'train' or 'test'.")
     
-    if mean is mean or std is None:
+    if mean is None or std is None:
         raise ValueError("Mean and Std must be filled")
+    if not train_augmentations and split == "train":
+        raise ValueError(
+            "train_augmentations must be a non-empty string when split='train'."
+        )
+    if not test_augmentations and split == "test":
+        raise ValueError(
+            "test_augmentations is empty but split='test'. "
+            "Provide at least one augmentation for testing."
+        )
 
     transform_names = list(train_augmentations.split('_')) if split == 'train' else list(test_augmentations.split('_'))
     compose = []
@@ -385,40 +452,44 @@ def get_transform(
     for transform_name, p in zip(transform_names, augment_ps):
         if 'grayscale' == transform_name:
             compose += [ContinousGrayScale(alpha=gray_alpha, p=p)]
-        if 'channelshuffle' == transform_name:
+        elif 'channelshuffle' == transform_name:
             compose += [ChannelShuffle(p=p)]
-        if 'bilateral' == transform_name:
+        elif 'bilateral' == transform_name:
             compose += [BilateralFilter(d=bilateral_d, sigma_color=sigma_color, sigma_space=sigma_space, p=p)]
-        if 'gaussianblur' in transform_name:
+        elif 'gaussianblur' in transform_name:
             compose += [GaussianBlur(k=gaussian_k, sigma=gaussian_sigma, p=p)]
-        if 'nlmeans' == transform_name:
+        elif 'nlmeans' == transform_name:
             compose += [FastNLMeansDenoising(
                 h=nlmeans_h,
                 template_window_size=template_window_size,
                 search_window_size=search_window_size,
                 p=p
             )]
-        if 'patchshuffle' == transform_name:
+        elif 'patchshuffle' == transform_name:
             compose += [PatchShuffle(grid_size=grid_size, p=p)]
-        if 'patchrotation' == transform_name:
+        elif 'patchrotation' == transform_name:
             compose += [PatchRotation(grid_size=grid_size, p=p)]
 
-        if 'randomresizedcrop' == transform_name:
+        elif 'randomresizedcrop' == transform_name:
             compose += [RandomResizedCrop((resize_size, resize_size), scale=(0.3, 1.0))]
-        if 'horizontalflip' == transform_name:
+        elif 'horizontalflip' == transform_name:
             compose += [HorizontalFlip()]
 
-        if 'resize' == transform_name:
+        elif 'resize' == transform_name:
             compose += [Resize((resize_size, resize_size))]
 
-        if 'resizecrop' == transform_name:
-            compose += [Resize((256, 256)), CenterCrop((224, 224))]
+        elif 'resizecrop' == transform_name:
+            compose += [Resize((resize_size, resize_size)), CenterCrop((224, 224))]
 
-        if 'crop' == transform_name:
+        elif 'crop' == transform_name:
             compose += [CenterCrop((224, 224))]
 
-        if 'cutout' == transform_name:
+        elif 'cutout' == transform_name:
             compose += [CutOut(p=p)]      
+        elif 'localwrap' == transform_name:
+            compose += [LocalWarping(alpha_localwrap, sigma_localwrap, p=p)]
+        else:
+            raise ValueError("Not Support Suppersion")
 
         
     compose += [transforms.ToTensor(), transforms.Normalize(mean, std)]
