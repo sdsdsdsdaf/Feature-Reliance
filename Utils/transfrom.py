@@ -417,19 +417,33 @@ def get_transform(
     search_window_size: Optional[int]=None,
     gaussian_k: Optional[int]=None,
     gaussian_sigma: Optional[float]=None,
-    alpha_localwrap: Optional[float]=None,
-    sigma_localwrap: float = 4.0,
+    alpha_localwarp: Optional[float]=None,
+    sigma_localwarp: float = 4.0,
     split: str = 'train',
+    normalize:bool=True,
    
     mean:tuple[float, float, float] = None,
     std:tuple[float, float, float] = None,
     
 ):
+    transform_names = list(train_augmentations.split('_')) if split == 'train' else list(test_augmentations.split('_'))
+    
+    supported = [
+        "resizecrop",
+        "grayscale",
+        "channelshuffle",
+        "bilateral",
+        "gaussianblur",
+        "patchshuffle",
+        "patchrotation",
+        "localwarp",
+    ]
+    
     if split not in {"train", "test", "val"}:
         raise ValueError("split must be either 'train' or 'test'.")
-    
-    if mean is None or std is None:
-        raise ValueError("Mean and Std must be filled")
+    if normalize:
+        if mean is None or std is None:
+            raise ValueError("Mean and Std must be filled")
     if not train_augmentations and split == "train":
         raise ValueError(
             "train_augmentations must be a non-empty string when split='train'."
@@ -440,7 +454,6 @@ def get_transform(
             "Provide at least one augmentation for testing."
         )
 
-    transform_names = list(train_augmentations.split('_')) if split == 'train' else list(test_augmentations.split('_'))
     compose = []
 
     if p_list is not None:
@@ -486,12 +499,15 @@ def get_transform(
 
         elif 'cutout' == transform_name:
             compose += [CutOut(p=p)]      
-        elif 'localwrap' == transform_name:
-            compose += [LocalWarping(alpha_localwrap, sigma_localwrap, p=p)]
+        elif 'localwarp' == transform_name:
+            compose += [LocalWarping(alpha_localwarp, sigma_localwarp, p=p)]
         else:
-            raise ValueError("Not Support Suppersion")
+            raise ValueError(
+                f"Unsupported suppression transform: {transform_name!r}. "
+                f"Supported transforms are: {supported}"
+            )
 
-        
-    compose += [transforms.ToTensor(), transforms.Normalize(mean, std)]
+    if normalize:    
+        compose += [transforms.ToTensor(), transforms.Normalize(mean, std)]
         
     return transforms.Compose(compose)
