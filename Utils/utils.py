@@ -608,6 +608,7 @@ def run_single_model_experiment(
     return result
 
 
+
 # =========================================================
 # Multi Model Runner
 # =========================================================
@@ -651,12 +652,7 @@ def run_experiments(
             perturbations=perturbations,
             max_samples=validation_max_samples,
         )
-
-        for name, record in output.perturbation_validation.results.items():
-            print(f"[{name}] hash={record.config_hash}")
-            for metric_name, metric_value in record.metrics.items():
-                print(f"  {metric_name}: {metric_value:.6f}")
-
+        
     for model_spec in model_specs:
         print(f"\n{'='*20} {model_spec.model_name} / {model_spec.pretrained_weight} {'='*20}")
 
@@ -756,5 +752,32 @@ def run_perturbation_validation(
             config_hash=config_hash,
             metrics=metrics,
         )
+        
+        def pretty_print_validation(results: dict):
+            print("\n" + "="*60)
+            print(" Perturbation Validation Summary ".center(60))
+            print("="*60)
 
+            header = (
+                f"{'Perturb':<14} | {'Feature':<8} | "
+                f"{'LV':>6} {'HFE':>6} {'ESSIM':>6} {'GC':>6} | "
+                f"{'Texture':>7} {'Shape':>7}"
+            )
+            print(header)
+            print("-"*60)
+
+            for name, record in results.items():
+                m = record.metrics
+
+                feature = transform_name_feature_supp_map.get(name, "N/A")
+
+                print(
+                    f"{name:<14} | {feature:<8} | "
+                    f"{m['LV_ratio']:6.3f} {m['HFE_ratio']:6.3f} {m['ESSIM']:6.3f} {m['GC']:6.3f} | "
+                    f"{m['texture_score']:7.3f} {m['shape_score']:7.3f}"
+                )
+
+            print("="*60 + "\n")
+    
+    pretty_print_validation(result.results)
     return result
