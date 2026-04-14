@@ -73,6 +73,8 @@ if __name__ == "__main__":
         ],
         verbose_image=False,
         save_summary=True,
+        run_validation=True,
+        validation_max_samples=None
     )
 
     print(result.model_results["resnet50__in1k"].original_accuracy)
