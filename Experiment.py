@@ -71,14 +71,8 @@ if __name__ == "__main__":
             "patchrotation",
             "localwarp",
         ],
-        verbose_image=False,
+        verbose_image=True,
         save_summary=True,
-        run_validation=True,
+        run_validation=False,
         validation_max_samples=None
     )
-
-    print(result.model_results["resnet50__in1k"].original_accuracy)
-    print(result.model_results["resnet50__in1k"].perturbations)
-    
-    print(result.model_results["vit-b__in1k"].original_accuracy)
-    print(result.model_results["vit__in1k"].perturbations)

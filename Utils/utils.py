@@ -19,13 +19,35 @@ from torch.utils.data import DataLoader
 
 
 try:
-    from Utils.Config import *
+    from Utils.Config import (
+        TransformHyperParams,
+        DataConfig,
+        ExtractionConfig,
+        ExtractedTensors,
+        ModelSpec,
+        PerturbationRecord,
+        ModelRunResult,
+        PerturbationMetricResult,
+        PerturbationValidationResult,
+        ExperimentResult,
+    )
     from Utils.transfrom import get_transform
     from Utils.Dataset import ImageNetValFlatDataset
     from Utils.metric import relative_accuracy
     from Utils.metric import compute_dataset_metrics
 except:
-    from Utils.Config import *
+    from Utils.Config import (
+        TransformHyperParams,
+        DataConfig,
+        ExtractionConfig,
+        ExtractedTensors,
+        ModelSpec,
+        PerturbationRecord,
+        ModelRunResult,
+        PerturbationMetricResult,
+        PerturbationValidationResult,
+        ExperimentResult,
+    )
     from transfrom import get_transform
     from Dataset import ImageNetValFlatDataset
     from metric import relative_accuracy
@@ -613,6 +635,13 @@ def run_single_model_experiment(
 # Multi Model Runner
 # =========================================================
 
+def get_next_trial_id(root):
+    existing = sorted([p.name for p in root.glob("trial_*")])
+    if not existing:
+        return 0
+    last = max(int(name.split("_")[1]) for name in existing)
+    return last + 1
+
 def run_experiments(
     model_specs: List[ModelSpec],
     transform_hparams: TransformHyperParams,
@@ -676,9 +705,14 @@ def run_experiments(
                 f"rel_acc={record.relative_accuracy_score:.6f} | "
                 f"hash={record.config_hash}"
             )
+            
+    # TODO Trial{id}\Experiment구조로 리팩토링
+    root = Path(extraction_config.root_dir) / "MetaData"
+    trial_id = get_next_trial_id(root)
 
+    run_dir = root / f"trial_{trial_id:04d}"
     if save_summary:
-        summary_path = Path(extraction_config.root_dir) / summary_name
+        summary_path = Path(run_dir) / summary_name
         save_json(output.to_jsonable(), summary_path)
         print(f"\n[Saved Summary] {summary_path}")
 
