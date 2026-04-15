@@ -361,6 +361,8 @@ def visualize_perturbations(
     perturbations: List[str],
     hparams: TransformHyperParams,
     sample_index: int = 3,
+    run_dir: Optional[str] = None,
+    show_seconds: int = 10,
 ) -> None:
     ds = (
         ImageNetValFlatDataset(dataset_root, transform=None)
@@ -402,7 +404,18 @@ def visualize_perturbations(
         ax.axis("off")
 
     plt.tight_layout()
-    plt.show()
+    
+    # Save
+    if run_dir is not None:
+        ensure_dir(run_dir)
+        save_path = Path(run_dir) / "visualization.png"
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(save_path, dpi=150)
+        print(f"[Saved] {save_path}")
+    
+    plt.show(block=False)
+    plt.pause(show_seconds)
+    plt.close(fig)
 
 
 # =========================================================
@@ -542,6 +555,8 @@ def run_single_model_experiment(
     extraction_config: ExtractionConfig,
     perturbations: List[str],
     verbose_image: bool = False,
+    plot_seconds: int = 10,
+    run_dir:Optional[str] = None,
 ) -> ModelRunResult:
     if "original" not in perturbations:
         perturbations = ["original"] + perturbations
@@ -551,6 +566,8 @@ def run_single_model_experiment(
             dataset_root=data_config.dataset_root,
             perturbations=perturbations,
             hparams=transform_hparams,
+            run_dir=run_dir,
+            show_seconds=plot_seconds
         )
 
     transforms = build_transform_dict(
@@ -649,6 +666,7 @@ def run_experiments(
     extraction_config: ExtractionConfig,
     perturbations: Optional[List[str]] = None,
     verbose_image: bool = False,
+    plot_seconds: int = 10,
     save_summary: bool = True,
     summary_name: str = "experiment_summary.json",
     run_validation: bool = True,
@@ -671,6 +689,11 @@ def run_experiments(
         extraction_config=extraction_config,
     )
     
+    root = Path(extraction_config.root_dir) / "MetaData"
+    trial_id = get_next_trial_id(root)
+
+    run_dir = root / f"trial_{trial_id:04d}"
+    
     # =====================================================
     # 1) perturbation validation 먼저 수행
     # =====================================================
@@ -692,6 +715,8 @@ def run_experiments(
             extraction_config=extraction_config,
             perturbations=perturbations,
             verbose_image=verbose_image,
+            plot_seconds = plot_seconds,
+            run_dir=run_dir
         )
 
         output.model_results[f"{model_spec.model_name}__{model_spec.pretrained_weight}"] = model_result
@@ -707,10 +732,6 @@ def run_experiments(
             )
             
     # TODO Trial{id}\Experiment구조로 리팩토링
-    root = Path(extraction_config.root_dir) / "MetaData"
-    trial_id = get_next_trial_id(root)
-
-    run_dir = root / f"trial_{trial_id:04d}"
     if save_summary:
         summary_path = Path(run_dir) / summary_name
         save_json(output.to_jsonable(), summary_path)
