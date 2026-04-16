@@ -15,6 +15,7 @@ from typing import Any, Dict
 import matplotlib.pyplot as plt
 from tqdm.auto import tqdm
 from torch.utils.data import DataLoader
+from pprint import pprint
 
 
 
@@ -35,6 +36,7 @@ try:
     from Utils.Dataset import ImageNetValFlatDataset
     from Utils.metric import relative_accuracy
     from Utils.metric import compute_dataset_metrics
+    from Utils.metric import linear_cka, js_divergence
 except:
     from Utils.Config import (
         TransformHyperParams,
@@ -52,6 +54,7 @@ except:
     from Dataset import ImageNetValFlatDataset
     from metric import relative_accuracy
     from metric import compute_dataset_metrics
+    from Utils.metric import linear_cka, js_divergence
 
 # TODO Hash 기반으로 리팩토링
 
@@ -92,6 +95,13 @@ def get_system_info():
 
 def load_imagenet(normalize=True):
     pass
+
+def load_saved_tensors(save_dir: str | Path) -> tuple[Tensor, Tensor, Tensor]:
+    save_dir = Path(save_dir)
+    reps = torch.load(save_dir / "representations.pt", weights_only=True)
+    logits = torch.load(save_dir / "logits.pt", weights_only=True)
+    labels = torch.load(save_dir / "labels.pt", weights_only=True)
+    return reps, logits, labels
 
 def get_device(device_str: str) -> torch.device:
     if device_str.startswith("cuda") and not torch.cuda.is_available():
@@ -155,13 +165,6 @@ def save_json(data: Dict[str, Any], path: str | Path) -> None:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def load_logits_and_labels(save_dir: str | Path) -> tuple[Tensor, Tensor]:
-    save_dir = Path(save_dir)
-    logits = torch.load(save_dir / "logits.pt", weights_only=True)
-    labels = torch.load(save_dir / "labels.pt", weights_only=True)
-    return logits, labels
-
-
 # =========================================================
 # Hash / Config
 # =========================================================
@@ -173,6 +176,7 @@ def make_config_hash(config: Dict[str, Any], hash_len: int = 12) -> str:
         ensure_ascii=False,
         separators=(",", ":"),
     )   
+    
     return hashlib.sha256(canonical_str.encode("utf-8")).hexdigest()[:hash_len]
 
 
@@ -432,6 +436,7 @@ def extract_logit_and_representation(
     perturbation_config: Dict[str, Any],
     extraction_config: ExtractionConfig,
 ) -> None:
+    
     device = get_device(extraction_config.device)
     dtype = get_torch_dtype(extraction_config.dtype)
 
@@ -486,11 +491,11 @@ def extract_logit_and_representation(
             else:
                 print("allclose?: skipped (different shapes)")
 
-        representations.append(rep.detach().to(dtype).cpu())
+        representations.append(rep.detach().float().cpu())
         logits.append(logit.detach().to(dtype).cpu())
         labels.append(label.detach().cpu())
 
-    representations = torch.cat(representations, dim=0).to(dtype)
+    representations = torch.cat(representations, dim=0).float()
     logits = torch.cat(logits, dim=0).to(dtype)
     labels = torch.cat(labels, dim=0)
 
@@ -515,9 +520,11 @@ def evaluate_saved_perturbation(
     pretrained_weight: str,
     perturbation: str,
     perturbation_config: Dict[str, Any],
+    original_config: Dict[str, Any],
     original_accuracy: Optional[float] = None,
     num_class: int = 1000,
 ) -> PerturbationRecord:
+
     save_dir = make_save_dir(
         root_dir=root_dir,
         model_name=model_name,
@@ -526,14 +533,37 @@ def evaluate_saved_perturbation(
         perturbation_config=perturbation_config,
     )
 
-    logits, labels = load_logits_and_labels(save_dir)
+    device = torch.device("cuda:0" if torch.cuda.is_available() else 'cpu')
+    
+    reps, logits, labels = load_saved_tensors(save_dir)
     acc = cal_accuracy(logits, labels)
 
     rel_acc = None
+    js_div = None
+    cka_score = None
+
     if perturbation != "original":
         if original_accuracy is None:
             raise ValueError("original_accuracy is required for non-original perturbations")
+
+        original_save_dir = make_save_dir(
+            root_dir=root_dir,
+            model_name=model_name,
+            pretrained_weight=pretrained_weight,
+            perturbation="original",
+            perturbation_config=original_config,
+        )
+
+        orig_reps, orig_logits, orig_labels = load_saved_tensors(original_save_dir)
+        orig_reps, orig_logits, orig_labels = orig_reps.to(device), orig_logits.to(device), orig_labels
+        reps, logits, labels = reps.to(device), logits.to(device), labels
+
+        if not torch.equal(labels, orig_labels):
+            raise ValueError("Label mismatch between original and perturbation runs.")
+
         rel_acc = relative_accuracy(acc, original_accuracy, num_class=num_class)
+        js_div = js_divergence(orig_logits.float(), logits.float()).item()
+        cka_score = linear_cka(orig_reps.float(), reps.float()).item()
 
     return PerturbationRecord(
         perturbation=perturbation,
@@ -541,6 +571,8 @@ def evaluate_saved_perturbation(
         save_dir=str(save_dir),
         accuracy=acc,
         relative_accuracy_score=rel_acc,
+        js_divergence=js_div,
+        cka=cka_score,
     )
 
 
@@ -556,8 +588,9 @@ def run_single_model_experiment(
     perturbations: List[str],
     verbose_image: bool = False,
     plot_seconds: int = 10,
-    run_dir:Optional[str] = None,
+    run_dir: Optional[str] = None,
 ) -> ModelRunResult:
+    
     if "original" not in perturbations:
         perturbations = ["original"] + perturbations
 
@@ -567,7 +600,7 @@ def run_single_model_experiment(
             perturbations=perturbations,
             hparams=transform_hparams,
             run_dir=run_dir,
-            show_seconds=plot_seconds
+            show_seconds=plot_seconds,
         )
 
     transforms = build_transform_dict(
@@ -583,7 +616,9 @@ def run_single_model_experiment(
         pretrained_weight=model_spec.pretrained_weight,
     )
 
-    # 1. Save tensors
+    # -----------------------------------------------------
+    # 1. Extract and save tensors for all perturbations
+    # -----------------------------------------------------
     for perturbation in perturbations:
         ds = (
             ImageNetValFlatDataset(data_config.dataset_root, transform=transforms[perturbation])
@@ -615,33 +650,43 @@ def run_single_model_experiment(
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    # 2. Evaluate from saved files
+    # -----------------------------------------------------
+    # 2. Evaluate original first
+    # -----------------------------------------------------
     original_config = build_perturbation_config("original", transform_hparams)
+
     original_record = evaluate_saved_perturbation(
         root_dir=extraction_config.root_dir,
         model_name=model_spec.model_name,
         pretrained_weight=model_spec.pretrained_weight,
         perturbation="original",
         perturbation_config=original_config,
+        original_config=original_config,
         original_accuracy=None,
     )
 
     result.original_accuracy = original_record.accuracy
     result.perturbations["original"] = original_record
 
+    # -----------------------------------------------------
+    # 3. Evaluate perturbed runs against original
+    # -----------------------------------------------------
     for perturbation in perturbations:
         if perturbation == "original":
             continue
 
         perturbation_config = build_perturbation_config(perturbation, transform_hparams)
+
         record = evaluate_saved_perturbation(
             root_dir=extraction_config.root_dir,
             model_name=model_spec.model_name,
             pretrained_weight=model_spec.pretrained_weight,
             perturbation=perturbation,
             perturbation_config=perturbation_config,
+            original_config=original_config,
             original_accuracy=result.original_accuracy,
         )
+
         result.perturbations[perturbation] = record
 
     return result
@@ -672,6 +717,7 @@ def run_experiments(
     run_validation: bool = True,
     validation_max_samples: Optional[int] = None,
 ) -> ExperimentResult:
+    
     if perturbations is None:
         perturbations = [
             "original",
@@ -721,13 +767,24 @@ def run_experiments(
 
         output.model_results[f"{model_spec.model_name}__{model_spec.pretrained_weight}"] = model_result
 
+        print()
         print(f"Original Acc: {model_result.original_accuracy:.6f}")
+
         for name, record in model_result.perturbations.items():
             if name == "original":
                 continue
+
+            acc = f"{record.accuracy:.6f}" if record.accuracy is not None else "None"
+            rel = f"{record.relative_accuracy_score:.6f}" if record.relative_accuracy_score is not None else "None"
+            js  = f"{record.js_divergence:.6f}" if record.js_divergence is not None else "None"
+            cka = f"{record.cka:.6f}" if record.cka is not None else "None"
+
             print(
-                f"{name:14s} | acc={record.accuracy:.6f} | "
-                f"rel_acc={record.relative_accuracy_score:.6f} | "
+                f"{name:14s} | "
+                f"acc={acc} | "
+                f"rel_acc={rel} | "
+                f"js={js} | "
+                f"cka={cka} | "
                 f"hash={record.config_hash}"
             )
             
