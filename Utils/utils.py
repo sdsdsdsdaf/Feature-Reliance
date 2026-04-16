@@ -1144,7 +1144,7 @@ def run_perturbation_validation(
                 f"{'Texture':>7} {'Shape':>7}"
             )
             print(header)
-            print("-"*60)
+            print("-"*73)
 
             for name, record in results.items():
                 m = record.metrics
@@ -1157,7 +1157,7 @@ def run_perturbation_validation(
                     f"{m['texture_score']:7.3f} {m['shape_score']:7.3f}"
                 )
 
-            print("="*60 + "\n")
+            print("="*73 + "\n")
     
     pretty_print_validation(result.results)
     return result
