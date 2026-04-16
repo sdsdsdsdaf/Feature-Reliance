@@ -2,7 +2,7 @@ import timm
 import torch
 
 from Utils.Config import *
-from Utils.utils import run_experiments, set_seed
+from Utils.utils import run_experiments, set_seed, get_system_info
 
 alpha_grid = [0, 5, 10, 20, 35, 50, 80]
 sigma_grid = [0.5, 1.0, 2.0, 3.5, 6.0]
@@ -10,6 +10,8 @@ sigma_grid = [0.5, 1.0, 2.0, 3.5, 6.0]
 
 if __name__ == "__main__":
     set_seed(42)
+    
+    get_system_info()
     
     resnet = timm.create_model("resnet50", pretrained=True)
     vit = timm.create_model("vit_base_patch16_224.augreg_in1k", pretrained=True)
@@ -114,6 +116,7 @@ if __name__ == "__main__":
                     "localwarp",
                 ],
                 id_dataset_name="imagenet",
+                verbose_image=True,
                 run_validation= True,
                 validation_max_samples = 10000, # 최종 실험시에는 None으로
             )
