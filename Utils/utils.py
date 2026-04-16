@@ -73,6 +73,44 @@ CLASS_MAPPING_REGISTRY = {
     },
 }
 
+import random
+import numpy as np
+import torch
+
+
+def set_seed(seed: int = 42, deterministic: bool = True):
+    """
+    Set random seed for reproducibility.
+
+    Args:
+        seed (int): seed value
+        deterministic (bool): if True, makes CUDA deterministic (slower)
+    """
+
+    # Python
+    random.seed(seed)
+
+    # Numpy
+    np.random.seed(seed)
+
+    # PyTorch
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+    # For CUDA determinism
+    if deterministic:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    else:
+        torch.backends.cudnn.benchmark = True
+
+    # For hash-based operations
+    import os
+    os.environ["PYTHONHASHSEED"] = str(seed)
+
+    print(f"[Seed set to {seed} | deterministic={deterministic}]")
+    
 
 def get_class_mapping(class_map_name: Optional[str]) -> Optional[Dict[str, Any]]:
     if class_map_name is None:
@@ -1096,9 +1134,9 @@ def run_perturbation_validation(
         )
         
         def pretty_print_validation(results: dict):
-            print("\n" + "="*60)
-            print(" Perturbation Validation Summary ".center(60))
-            print("="*60)
+            print("\n" + "="*73)
+            print(" Perturbation Validation Summary ".center(73))
+            print("="*73)
 
             header = (
                 f"{'Perturb':<14} | {'Feature':<8} | "
