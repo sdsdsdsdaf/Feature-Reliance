@@ -51,11 +51,32 @@ if __name__ == "__main__":
             )
 
             data_config = DataConfig(
-                batch_size=256,
+                batch_size=512,
                 num_workers=4,
                 pin_memory=False,
                 shuffle=False,
-                dataset_root="Data",   # 필요 없으면 None
+                datasets=[
+                    DatasetSpec(
+                        name="imagenet",
+                        dataset_type="imagenet_val_flat",
+                        root="Data",
+                        split="val",
+                        num_classes=1000,
+                        domain_type="id",
+                    ),
+                    # OOD dataset 추가 시
+                    # DatasetSpec(
+                    #     name="imagenet_r",
+                    #     dataset_type="imagenet_r",
+                    #     root="Data/ImageNet-R",
+                    #     split="val",
+                    #     num_classes=1000,
+                    #     domain_type="natural_ood",
+                    #     shift_type="style",
+                    #     class_map_name="imagenet_r_subset_map",
+                    #     eval_protocol_name="imagenet_r_eval",
+                    # ),
+                ],
             )
 
             extraction_config = ExtractionConfig(
@@ -65,23 +86,32 @@ if __name__ == "__main__":
                 overwrite=False,
                 debug_first_batch=False,
             )
+            
+            scenarios = [
+                EvalScenario(dataset_name="imagenet", perturbation="original"),
+                EvalScenario(dataset_name="imagenet", perturbation="grayscale"),
+                EvalScenario(dataset_name="imagenet", perturbation="patchshuffle"),
 
-            result:ExperimentResult = run_experiments(
+                EvalScenario(dataset_name="imagenet_r", perturbation="original"),
+                EvalScenario(dataset_name="imagenet_r", perturbation="grayscale"),
+                EvalScenario(dataset_name="imagenet_r", perturbation="patchshuffle"),
+            ] # 개별 실험 내역
+
+            result = run_experiments(
                 model_specs=model_specs,
                 transform_hparams=transform_hparams,
                 data_config=data_config,
                 extraction_config=extraction_config,
                 perturbations=[
                     "original",
-                    "bilateral",
                     "grayscale",
+                    "bilateral",
                     "patchshuffle",
                     "patchrotation",
                     "localwarp",
                 ],
-                verbose_image=True,
-                save_summary=True,
-                run_validation=False,
-                validation_max_samples=800
+                id_dataset_name="imagenet",
+                run_validation= True,
+                validation_max_samples = 800, # 최종 실험시에는 None으로
             )
             print()

@@ -1,7 +1,8 @@
 from dataclasses import dataclass, field, asdict, is_dataclass
 from typing import Dict, List, Optional, Any
 from torch import Tensor
-import torch.nn as nn   
+import torch.nn as nn
+
 
 @dataclass
 class TransformHyperParams:
@@ -29,13 +30,30 @@ class TransformHyperParams:
     sigma_localwarp: float = 2.5
 
 
+
+@dataclass
+class DatasetSpec:
+    name: str
+    dataset_type: str                    # e.g. "imagenet_val_flat", "imagenet_r"
+    root: Optional[str] = None
+    split: str = "val"
+    num_classes: int = 1000
+
+    # Metadata for analysis
+    domain_type: str = "id"             # "id", "natural_ood", "synthetic_ood"
+    shift_type: Optional[str] = None    # "texture", "style", "shape", "mixed"
+    class_map_name: Optional[str] = None
+    eval_protocol_name: Optional[str] = None
+
+
+
 @dataclass
 class DataConfig:
     batch_size: int = 512
     num_workers: int = 4
     pin_memory: bool = True
     shuffle: bool = False
-    dataset_root: Optional[str] = None
+    datasets: List[DatasetSpec] = field(default_factory=list)
 
 
 @dataclass
@@ -57,15 +75,33 @@ class ModelSpec:
 
 
 @dataclass
-class PerturbationRecord:
+class EvalScenario:
+    dataset_name: str
+    perturbation: str = "original"
+    scenario_name: Optional[str] = None
+    normalize: bool = True
+
+
+
+@dataclass
+class ScenarioRecord:
+    scenario_name: str
+    dataset_name: str
     perturbation: str
     config_hash: str
     save_dir: str
+
     accuracy: Optional[float] = None
     relative_accuracy_score: Optional[float] = None
-
     js_divergence: Optional[float] = None
     cka: Optional[float] = None
+
+    # OOD-aware
+    accuracy_drop_vs_same_dataset_clean: Optional[float] = None
+    accuracy_drop_vs_id_clean: Optional[float] = None
+    ood_gap_vs_id_clean: Optional[float] = None
+    intervention_gain_vs_same_dataset_clean: Optional[float] = None
+
 
 @dataclass
 class ExtractedTensors:
@@ -73,12 +109,13 @@ class ExtractedTensors:
     logits: Tensor
     labels: Tensor
 
+
+
 @dataclass
 class ModelRunResult:
     model_name: str
     pretrained_weight: str
-    original_accuracy: Optional[float] = None
-    perturbations: Dict[str, PerturbationRecord] = field(default_factory=dict)
+    scenario_results: Dict[str, ScenarioRecord] = field(default_factory=dict)
 
 
 @dataclass
@@ -92,11 +129,13 @@ class PerturbationMetricResult:
 class PerturbationValidationResult:
     results: Dict[str, PerturbationMetricResult] = field(default_factory=dict)
 
+
 @dataclass
 class ExperimentResult:
     transform_hparams: TransformHyperParams
     data_config: DataConfig
     extraction_config: ExtractionConfig
+    scenarios: List[EvalScenario] = field(default_factory=list)
     perturbation_validation: Optional[PerturbationValidationResult] = None
     model_results: Dict[str, ModelRunResult] = field(default_factory=dict)
 
@@ -105,33 +144,26 @@ class ExperimentResult:
         import torch
 
         def safe_cast(obj):
-            # Dataclass -> dict
             if is_dataclass(obj):
                 return {k: safe_cast(v) for k, v in asdict(obj).items()}
 
-            # Dict
             if isinstance(obj, dict):
                 return {k: safe_cast(v) for k, v in obj.items()}
 
-            # List / Tuple
             if isinstance(obj, (list, tuple)):
                 return [safe_cast(v) for v in obj]
 
-            # Torch tensor
             if isinstance(obj, torch.Tensor):
                 if obj.numel() == 1:
                     return obj.item()
                 return obj.detach().cpu().tolist()
 
-            # Numpy array
             if isinstance(obj, np.ndarray):
                 return obj.tolist()
 
-            # Numpy scalar
             if isinstance(obj, np.generic):
                 return obj.item()
 
-            # Path 같은 것도 혹시 있으면 문자열화
             try:
                 from pathlib import Path
                 if isinstance(obj, Path):
@@ -145,6 +177,7 @@ class ExperimentResult:
             "transform_hparams": safe_cast(self.transform_hparams),
             "data_config": safe_cast(self.data_config),
             "extraction_config": safe_cast(self.extraction_config),
+            "scenarios": safe_cast(self.scenarios),
             "model_results": safe_cast(self.model_results),
             "perturbation_validation": (
                 safe_cast(self.perturbation_validation.results)
@@ -152,5 +185,3 @@ class ExperimentResult:
                 else None
             ),
         }
-        
-        
