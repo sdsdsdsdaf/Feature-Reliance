@@ -2,13 +2,15 @@ import timm
 import torch
 
 from Utils.Config import *
-from Utils.utils import run_experiments
+from Utils.utils import run_experiments, set_seed
 
 alpha_grid = [0, 5, 10, 20, 35, 50, 80]
 sigma_grid = [0.5, 1.0, 2.0, 3.5, 6.0]
 
-if __name__ == "__main__":
 
+if __name__ == "__main__":
+    set_seed(42)
+    
     resnet = timm.create_model("resnet50", pretrained=True)
     vit = timm.create_model("vit_base_patch16_224.augreg_in1k", pretrained=True)
     i = 0
