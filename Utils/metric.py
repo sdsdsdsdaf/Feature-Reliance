@@ -12,7 +12,7 @@ from tqdm import tqdm
 
 # TODO Simtorch로 계산 결과 동일하게 나오는지 검증
 
-def linear_cka(X:Tensor, Y:Tensor, eps=1e-12) -> Tensor:
+def linear_cka(X:Tensor, Y:Tensor, eps=1e-12, return_float:bool=False) -> Tensor:
     X = X.reshape(X.size(0), -1)
     Y = Y.reshape(Y.size(0), -1)
 
@@ -22,8 +22,12 @@ def linear_cka(X:Tensor, Y:Tensor, eps=1e-12) -> Tensor:
     hsic_xy = (X.T @ Y).pow(2).sum()
     hsic_xx = (X.T @ X).pow(2).sum()
     hsic_yy = (Y.T @ Y).pow(2).sum()
+    
+    result = (hsic_xy / (torch.sqrt(hsic_xx * hsic_yy) + eps))
+    if return_float:
+        result = result.item()
 
-    return (hsic_xy / (torch.sqrt(hsic_xx * hsic_yy) + eps))
+    return result
 
 def relative_accuracy(
     acc_sup: float,
@@ -47,7 +51,7 @@ def relative_accuracy(
 
     return rel_acc
 
-def kl_divergence(logits_p: Tensor, logits_q: Tensor) -> Tensor:
+def kl_divergence(logits_p: Tensor, logits_q: Tensor, return_float:bool=False) -> Tensor:
     """
     Compute KL(P || Q)
 
@@ -57,10 +61,16 @@ def kl_divergence(logits_p: Tensor, logits_q: Tensor) -> Tensor:
     """
     p = F.softmax(logits_p, dim=-1)
     log_q = F.log_softmax(logits_q, dim=-1)
-    return F.kl_div(log_q, p, reduction="batchmean")
+    
+    result = F.kl_div(log_q, p, reduction="batchmean")
+    if return_float:
+        result = result.item()
+
+    return result
 
 
-def js_divergence(logits_p: Tensor, logits_q: Tensor) -> Tensor:
+
+def js_divergence(logits_p: Tensor, logits_q: Tensor, return_float:bool=False) -> Tensor:
     """
     Compute JS(P, Q) = 0.5 * KL(P || M) + 0.5 * KL(Q || M)
     where M = 0.5 * (P + Q)
@@ -72,8 +82,12 @@ def js_divergence(logits_p: Tensor, logits_q: Tensor) -> Tensor:
     log_m = torch.log(m.clamp_min(1e-12))
     kl_pm = F.kl_div(log_m, p, reduction="batchmean")
     kl_qm = F.kl_div(log_m, q, reduction="batchmean")
+    
+    result = 0.5 * (kl_pm + kl_qm)
+    if return_float:
+        result = result.item()
 
-    return 0.5 * (kl_pm + kl_qm)
+    return result
 
 
 # Feature Suppression 측정 함수

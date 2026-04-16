@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, is_dataclass
 from typing import Dict, List, Optional, Any
 from torch import Tensor
 import torch.nn as nn   
@@ -64,6 +64,9 @@ class PerturbationRecord:
     accuracy: Optional[float] = None
     relative_accuracy_score: Optional[float] = None
 
+    js_divergence: Optional[float] = None
+    cka: Optional[float] = None
+
 @dataclass
 class ExtractedTensors:
     representations: Tensor
@@ -98,30 +101,56 @@ class ExperimentResult:
     model_results: Dict[str, ModelRunResult] = field(default_factory=dict)
 
     def to_jsonable(self) -> Dict[str, Any]:
+        import numpy as np
+        import torch
+
+        def safe_cast(obj):
+            # Dataclass -> dict
+            if is_dataclass(obj):
+                return {k: safe_cast(v) for k, v in asdict(obj).items()}
+
+            # Dict
+            if isinstance(obj, dict):
+                return {k: safe_cast(v) for k, v in obj.items()}
+
+            # List / Tuple
+            if isinstance(obj, (list, tuple)):
+                return [safe_cast(v) for v in obj]
+
+            # Torch tensor
+            if isinstance(obj, torch.Tensor):
+                if obj.numel() == 1:
+                    return obj.item()
+                return obj.detach().cpu().tolist()
+
+            # Numpy array
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+
+            # Numpy scalar
+            if isinstance(obj, np.generic):
+                return obj.item()
+
+            # Path 같은 것도 혹시 있으면 문자열화
+            try:
+                from pathlib import Path
+                if isinstance(obj, Path):
+                    return str(obj)
+            except Exception:
+                pass
+
+            return obj
+
         return {
-            "transform_hparams": asdict(self.transform_hparams),
-            "data_config": asdict(self.data_config),
-            "extraction_config": asdict(self.extraction_config),
-            "model_results": {
-                k: {
-                    "model_name": v.model_name,
-                    "pretrained_weight": v.pretrained_weight,
-                    "original_accuracy": v.original_accuracy,
-                    "perturbations": {
-                        pk: asdict(pv) for pk, pv in v.perturbations.items()
-                    },
-                }
-                for k, v in self.model_results.items()
-            },
+            "transform_hparams": safe_cast(self.transform_hparams),
+            "data_config": safe_cast(self.data_config),
+            "extraction_config": safe_cast(self.extraction_config),
+            "model_results": safe_cast(self.model_results),
             "perturbation_validation": (
-                {
-                    k: asdict(v) if hasattr(v, "__dataclass_fields__") else v
-                    for k, v in self.perturbation_validation.results.items()
-                }
+                safe_cast(self.perturbation_validation.results)
                 if self.perturbation_validation is not None
                 else None
             ),
-                
         }
         
         
