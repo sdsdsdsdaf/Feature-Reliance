@@ -18,7 +18,6 @@ from torch.utils.data import DataLoader
 from pprint import pprint
 
 
-
 try:
     from Utils.Config import (
         TransformHyperParams,
@@ -26,11 +25,13 @@ try:
         ExtractionConfig,
         ExtractedTensors,
         ModelSpec,
-        PerturbationRecord,
         ModelRunResult,
         PerturbationMetricResult,
         PerturbationValidationResult,
         ExperimentResult,
+        DatasetSpec, 
+        EvalScenario,
+        ScenarioRecord
     )
     from Utils.transfrom import get_transform
     from Utils.Dataset import ImageNetValFlatDataset
@@ -44,11 +45,13 @@ except:
         ExtractionConfig,
         ExtractedTensors,
         ModelSpec,
-        PerturbationRecord,
         ModelRunResult,
         PerturbationMetricResult,
         PerturbationValidationResult,
         ExperimentResult,
+        DatasetSpec, 
+        EvalScenario,
+        ScenarioRecord
     )
     from transfrom import get_transform
     from Dataset import ImageNetValFlatDataset
@@ -56,7 +59,27 @@ except:
     from metric import compute_dataset_metrics
     from Utils.metric import linear_cka, js_divergence
 
-# TODO Hash 기반으로 리팩토링
+# =========================================================
+# Evaluation Protocol / Class Mapping
+# =========================================================
+
+IMAGENET_R_CLASS_IDS = [
+    # TODO: fill with the official 1k-class indices used by ImageNet-R
+]
+
+CLASS_MAPPING_REGISTRY = {
+    "imagenet_r_subset_map": {
+        "subset_class_ids": IMAGENET_R_CLASS_IDS,
+    },
+}
+
+
+def get_class_mapping(class_map_name: Optional[str]) -> Optional[Dict[str, Any]]:
+    if class_map_name is None:
+        return None
+    if class_map_name not in CLASS_MAPPING_REGISTRY:
+        raise ValueError(f"Unknown class_map_name: {class_map_name}")
+    return CLASS_MAPPING_REGISTRY[class_map_name]
 
 def get_system_info():
     print("===== System Info =====")
@@ -103,6 +126,26 @@ def load_saved_tensors(save_dir: str | Path) -> tuple[Tensor, Tensor, Tensor]:
     labels = torch.load(save_dir / "labels.pt", weights_only=True)
     return reps, logits, labels
 
+def load_saved_scenario_tensors(
+    root_dir: str,
+    model_name: str,
+    pretrained_weight: str,
+    dataset_spec: DatasetSpec,
+    perturbation: str,
+    scenario_config: Dict[str, Any],
+):
+    save_dir = make_save_dir(
+        root_dir=root_dir,
+        model_name=model_name,
+        pretrained_weight=pretrained_weight,
+        dataset_name=dataset_spec.name,
+        split=dataset_spec.split,
+        perturbation=perturbation,
+        scenario_config=scenario_config,
+    )
+    reps, logits, labels = load_saved_tensors(save_dir)
+    return save_dir, reps, logits, labels
+
 def get_device(device_str: str) -> torch.device:
     if device_str.startswith("cuda") and not torch.cuda.is_available():
         return torch.device("cpu")
@@ -114,9 +157,35 @@ def ensure_dir(path: str | Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     return path
 
-def cal_accuracy(logits: Tensor, labels: Tensor) -> float:
-    preds = torch.argmax(logits, dim=1)
-    return (preds == labels).float().mean().item()
+def cal_accuracy(
+    logits: Tensor,
+    labels: Tensor,
+    class_map_name: Optional[str] = None,
+) -> float:
+    mapping = get_class_mapping(class_map_name)
+
+    if mapping is None:
+        preds = torch.argmax(logits, dim=1)
+        return (preds == labels).float().mean().item()
+
+    # Example: subset evaluation such as ImageNet-R
+    if "subset_class_ids" in mapping:
+        subset_class_ids = mapping["subset_class_ids"]
+        subset_idx = torch.tensor(subset_class_ids, device=logits.device, dtype=torch.long)
+
+        logits_subset = logits.index_select(dim=1, index=subset_idx)
+        preds_subset_local = torch.argmax(logits_subset, dim=1)
+        preds_global = subset_idx[preds_subset_local]
+
+        valid_mask = torch.isin(labels.to(logits.device), subset_idx)
+
+        if valid_mask.sum().item() == 0:
+            raise ValueError("No valid labels found for subset evaluation.")
+
+        correct = (preds_global[valid_mask] == labels.to(logits.device)[valid_mask]).float().mean().item()
+        return correct
+
+    raise ValueError(f"Unsupported mapping format for {class_map_name}")
 
 def maybe_save_tensors(
     save_dir: Path,
@@ -153,11 +222,6 @@ def ensure_dir(path: str | Path) -> Path:
     return path
 
 
-def cal_accuracy(logit: Tensor, label: Tensor) -> float:
-    pred = torch.argmax(logit, dim=1)
-    return (pred == label).float().mean().item()
-
-
 def save_json(data: Dict[str, Any], path: str | Path) -> None:
     path = Path(path)
     ensure_dir(path.parent)
@@ -179,6 +243,62 @@ def make_config_hash(config: Dict[str, Any], hash_len: int = 12) -> str:
     
     return hashlib.sha256(canonical_str.encode("utf-8")).hexdigest()[:hash_len]
 
+
+def build_scenario_config(
+    dataset_spec: DatasetSpec,
+    perturbation: str,
+    hparams: TransformHyperParams,
+) -> Dict[str, Any]:
+    config = {
+        "dataset_name": dataset_spec.name,
+        "dataset_type": dataset_spec.dataset_type,
+        "split": dataset_spec.split,
+        "num_classes": dataset_spec.num_classes,
+        "class_map_name": dataset_spec.class_map_name,
+        "eval_protocol_name": dataset_spec.eval_protocol_name,
+        "domain_type": dataset_spec.domain_type,
+        "shift_type": dataset_spec.shift_type,
+        "perturbation": perturbation,
+        "prefix": hparams.prefix,
+        "resize_size": hparams.resize_size,
+        "p": hparams.p,
+    }
+
+    if perturbation == "original":
+        return config
+
+    if perturbation == "grayscale":
+        config.update({
+            "gray_alpha": hparams.gray_alpha,
+        })
+    elif perturbation == "bilateral":
+        config.update({
+            "bilateral_d": hparams.bilateral_d,
+            "sigma_color": hparams.sigma_color,
+            "sigma_space": hparams.sigma_space,
+        })
+    elif perturbation == "gaussianblur":
+        config.update({
+            "gaussian_k": hparams.gaussian_k,
+            "gaussian_sigma": hparams.gaussian_sigma,
+        })
+    elif perturbation == "patchshuffle":
+        config.update({
+            "grid_size": hparams.grid_size,
+        })
+    elif perturbation == "patchrotation":
+        config.update({
+            "grid_size": hparams.grid_size,
+        })
+    elif perturbation == "localwarp":
+        config.update({
+            "alpha_localwarp": hparams.alpha_localwarp,
+            "sigma_localwarp": hparams.sigma_localwarp,
+        })
+    else:
+        raise ValueError(f"Unsupported perturbation: {perturbation}")
+
+    return config
 
 def build_perturbation_config(
     perturbation: str,
@@ -227,21 +347,49 @@ def build_perturbation_config(
 
     return config
 
+def build_dataset(dataset_spec: DatasetSpec, transform):
+    if dataset_spec.dataset_type == "imagenet_val_flat":
+        return (
+            ImageNetValFlatDataset(dataset_spec.root, transform=transform)
+            if dataset_spec.root is not None
+            else ImageNetValFlatDataset(transform=transform)
+        )
+
+    # TODO: implement actual dataset classes
+    elif dataset_spec.dataset_type == "imagenet_r":
+        return NotImplementedError("ImageNet-R is Not Impelemented")
+
+    elif dataset_spec.dataset_type == "stylized_imagenet":
+        return NotImplementedError("ImageNet-C Not Implemeted   ")
+
+    else:
+        raise ValueError(f"Unsupported dataset_type: {dataset_spec.dataset_type}")
+
 
 def make_save_dir(
     root_dir: str,
     model_name: str,
     pretrained_weight: str,
+    dataset_name: str,
+    split: str,
     perturbation: str,
-    perturbation_config: Dict[str, Any],
+    scenario_config: Dict[str, Any],
 ) -> Path:
-    config_hash = make_config_hash(perturbation_config)
-    save_dir = Path(root_dir) / model_name / pretrained_weight / perturbation / config_hash
+    config_hash = make_config_hash(scenario_config)
+    save_dir = (
+        Path(root_dir)
+        / model_name
+        / pretrained_weight
+        / dataset_name
+        / split
+        / perturbation
+        / config_hash
+    )
     ensure_dir(save_dir)
 
     config_path = save_dir / "config.json"
     if not config_path.exists():
-        save_json(perturbation_config, config_path)
+        save_json(scenario_config, config_path)
 
     return save_dir
 
@@ -336,6 +484,33 @@ def build_transform(
 
     raise ValueError(f"Unsupported perturbation: {perturbation}")
 
+
+def get_scenario_name(dataset_name: str, perturbation: str) -> str:
+    return f"{dataset_name}__{perturbation}"
+
+
+def get_dataset_spec_by_name(data_config: DataConfig, dataset_name: str) -> DatasetSpec:
+    for ds in data_config.datasets:
+        if ds.name == dataset_name:
+            return ds
+    raise ValueError(f"Dataset '{dataset_name}' not found in data_config.datasets")
+
+
+def build_default_scenarios(
+    data_config: DataConfig,
+    perturbations: List[str],
+) -> List[EvalScenario]:
+    scenarios = []
+    for ds in data_config.datasets:
+        for p in perturbations:
+            scenarios.append(
+                EvalScenario(
+                    dataset_name=ds.name,
+                    perturbation=p,
+                    scenario_name=get_scenario_name(ds.name, p),
+                )
+            )
+    return scenarios
 
 def build_transform_dict(
     mean: List[float],
@@ -432,11 +607,12 @@ def extract_logit_and_representation(
     dataloader: DataLoader,
     model_name: str,
     pretrained_weight: str,
+    dataset_spec: DatasetSpec,
     perturbation: str,
-    perturbation_config: Dict[str, Any],
+    scenario_config: Dict[str, Any],
     extraction_config: ExtractionConfig,
 ) -> None:
-    
+
     device = get_device(extraction_config.device)
     dtype = get_torch_dtype(extraction_config.dtype)
 
@@ -447,8 +623,10 @@ def extract_logit_and_representation(
         root_dir=extraction_config.root_dir,
         model_name=model_name,
         pretrained_weight=pretrained_weight,
+        dataset_name=dataset_spec.name,
+        split=dataset_spec.split,
         perturbation=perturbation,
-        perturbation_config=perturbation_config,
+        scenario_config=scenario_config,
     )
 
     logits_path = save_dir / "logits.pt"
@@ -471,7 +649,9 @@ def extract_logit_and_representation(
     logits = []
     labels = []
 
-    for i, (image, label) in enumerate(tqdm(dataloader, desc=f"Extracting [{model_name}/{perturbation}]")):
+    for i, (image, label) in enumerate(
+        tqdm(dataloader, desc=f"Extracting [{model_name}/{dataset_spec.name}/{perturbation}]")
+    ):
         image = image.to(device, non_blocking=True)
 
         feat = model.forward_features(image)
@@ -504,9 +684,8 @@ def extract_logit_and_representation(
     torch.save(labels, labels_path)
 
     print(f"[Saved] {save_dir}")
-    
+
     del representations, logits, labels
-    
     return None
 
 
@@ -514,66 +693,96 @@ def extract_logit_and_representation(
 # Metric Evaluation from Saved Files
 # =========================================================
 
-def evaluate_saved_perturbation(
+def evaluate_saved_scenario(
     root_dir: str,
     model_name: str,
     pretrained_weight: str,
+    dataset_spec: DatasetSpec,
     perturbation: str,
-    perturbation_config: Dict[str, Any],
-    original_config: Dict[str, Any],
-    original_accuracy: Optional[float] = None,
-    num_class: int = 1000,
-) -> PerturbationRecord:
+    scenario_config: Dict[str, Any],
+    same_dataset_clean_config: Optional[Dict[str, Any]] = None,
+    id_clean_dataset_spec: Optional[DatasetSpec] = None,
+    id_clean_config: Optional[Dict[str, Any]] = None,
+) -> ScenarioRecord:
 
-    save_dir = make_save_dir(
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+    save_dir, reps, logits, labels = load_saved_scenario_tensors(
         root_dir=root_dir,
         model_name=model_name,
         pretrained_weight=pretrained_weight,
+        dataset_spec=dataset_spec,
         perturbation=perturbation,
-        perturbation_config=perturbation_config,
+        scenario_config=scenario_config,
     )
 
-    device = torch.device("cuda:0" if torch.cuda.is_available() else 'cpu')
-    
-    reps, logits, labels = load_saved_tensors(save_dir)
-    acc = cal_accuracy(logits, labels)
+    reps, logits, labels = reps.to(device), logits.to(device), labels.to(device)
+    acc = cal_accuracy(logits, labels, class_map_name=dataset_spec.class_map_name,)
 
-    rel_acc = None
-    js_div = None
-    cka_score = None
+    scenario_name = get_scenario_name(dataset_spec.name, perturbation)
 
-    if perturbation != "original":
-        if original_accuracy is None:
-            raise ValueError("original_accuracy is required for non-original perturbations")
+    record = ScenarioRecord(
+        scenario_name=scenario_name,
+        dataset_name=dataset_spec.name,
+        perturbation=perturbation,
+        config_hash=make_config_hash(scenario_config),
+        save_dir=str(save_dir),
+        accuracy=acc,
+    )
 
-        original_save_dir = make_save_dir(
+    # Compare against same-dataset clean
+    if same_dataset_clean_config is not None and perturbation != "original":
+        _, clean_reps, clean_logits, clean_labels = load_saved_scenario_tensors(
             root_dir=root_dir,
             model_name=model_name,
             pretrained_weight=pretrained_weight,
+            dataset_spec=dataset_spec,
             perturbation="original",
-            perturbation_config=original_config,
+            scenario_config=same_dataset_clean_config,
         )
 
-        orig_reps, orig_logits, orig_labels = load_saved_tensors(original_save_dir)
-        orig_reps, orig_logits, orig_labels = orig_reps.to(device), orig_logits.to(device), orig_labels
-        reps, logits, labels = reps.to(device), logits.to(device), labels
+        clean_reps, clean_logits, clean_labels = clean_reps.to(device), clean_logits.to(device), clean_labels.to(device)
 
-        if not torch.equal(labels, orig_labels):
-            raise ValueError("Label mismatch between original and perturbation runs.")
+        if not torch.equal(labels, clean_labels):
+            raise ValueError(f"Label mismatch in same-dataset clean comparison: {scenario_name}")
 
-        rel_acc = relative_accuracy(acc, original_accuracy, num_class=num_class)
-        js_div = js_divergence(orig_logits.float(), logits.float()).item()
-        cka_score = linear_cka(orig_reps.float(), reps.float()).item()
+        clean_acc = cal_accuracy(
+            clean_logits,
+            clean_labels,
+            class_map_name=dataset_spec.class_map_name,
+        )
+        record.accuracy_drop_vs_same_dataset_clean = clean_acc - acc
+        record.intervention_gain_vs_same_dataset_clean = acc - clean_acc
+        record.relative_accuracy_score = relative_accuracy(
+            acc, clean_acc, num_class=dataset_spec.num_classes
+        )
+        record.js_divergence = js_divergence(clean_logits.float(), logits.float()).item()
+        record.cka = linear_cka(clean_reps.float(), reps.float()).item()
 
-    return PerturbationRecord(
-        perturbation=perturbation,
-        config_hash=make_config_hash(perturbation_config),
-        save_dir=str(save_dir),
-        accuracy=acc,
-        relative_accuracy_score=rel_acc,
-        js_divergence=js_div,
-        cka=cka_score,
-    )
+    # Compare against ID clean
+    if id_clean_dataset_spec is not None and id_clean_config is not None:
+        _, id_reps, id_logits, id_labels = load_saved_scenario_tensors(
+            root_dir=root_dir,
+            model_name=model_name,
+            pretrained_weight=pretrained_weight,
+            dataset_spec=id_clean_dataset_spec,
+            perturbation="original",
+            scenario_config=id_clean_config,
+        )
+
+        
+        
+        id_logits, id_labels = id_logits.to(device), id_labels.to(device)
+        id_acc = cal_accuracy(
+            id_logits,
+            id_labels,
+            class_map_name=id_clean_dataset_spec.class_map_name,
+        )
+
+        record.accuracy_drop_vs_id_clean = id_acc - acc
+        record.ood_gap_vs_id_clean = acc - id_acc
+
+    return record
 
 
 # =========================================================
@@ -585,46 +794,43 @@ def run_single_model_experiment(
     transform_hparams: TransformHyperParams,
     data_config: DataConfig,
     extraction_config: ExtractionConfig,
-    perturbations: List[str],
+    scenarios: List[EvalScenario],
     verbose_image: bool = False,
     plot_seconds: int = 10,
     run_dir: Optional[str] = None,
+    id_dataset_name: str = "imagenet",
 ) -> ModelRunResult:
-    
-    if "original" not in perturbations:
-        perturbations = ["original"] + perturbations
-
-    if verbose_image:
-        visualize_perturbations(
-            dataset_root=data_config.dataset_root,
-            perturbations=perturbations,
-            hparams=transform_hparams,
-            run_dir=run_dir,
-            show_seconds=plot_seconds,
-        )
-
-    transforms = build_transform_dict(
-        mean=model_spec.mean,
-        std=model_spec.std,
-        hparams=transform_hparams,
-        perturbations=perturbations,
-        normalize=True,
-    )
 
     result = ModelRunResult(
         model_name=model_spec.model_name,
         pretrained_weight=model_spec.pretrained_weight,
     )
 
-    # -----------------------------------------------------
-    # 1. Extract and save tensors for all perturbations
-    # -----------------------------------------------------
-    for perturbation in perturbations:
-        ds = (
-            ImageNetValFlatDataset(data_config.dataset_root, transform=transforms[perturbation])
-            if data_config.dataset_root is not None
-            else ImageNetValFlatDataset(transform=transforms[perturbation])
+    # Optional visualization only for the first ID dataset
+    if verbose_image:
+        first_dataset_spec = get_dataset_spec_by_name(data_config, scenarios[0].dataset_name)
+        vis_perturbations = sorted(list({s.perturbation for s in scenarios if s.dataset_name == first_dataset_spec.name}))
+        visualize_perturbations(
+            dataset_root=first_dataset_spec.root,
+            perturbations=vis_perturbations,
+            hparams=transform_hparams,
+            run_dir=run_dir,
+            show_seconds=plot_seconds,
         )
+
+    # 1. Extract for all scenarios
+    for scenario in scenarios:
+        dataset_spec = get_dataset_spec_by_name(data_config, scenario.dataset_name)
+
+        transform = build_transform(
+            perturbation=scenario.perturbation,
+            mean=model_spec.mean,
+            std=model_spec.std,
+            hparams=transform_hparams,
+            normalize=scenario.normalize,
+        )
+
+        ds = build_dataset(dataset_spec, transform=transform)
 
         dataloader = DataLoader(
             ds,
@@ -634,15 +840,20 @@ def run_single_model_experiment(
             pin_memory=data_config.pin_memory,
         )
 
-        perturbation_config = build_perturbation_config(perturbation, transform_hparams)
+        scenario_config = build_scenario_config(
+            dataset_spec=dataset_spec,
+            perturbation=scenario.perturbation,
+            hparams=transform_hparams,
+        )
 
         extract_logit_and_representation(
             model=model_spec.model,
             dataloader=dataloader,
             model_name=model_spec.model_name,
             pretrained_weight=model_spec.pretrained_weight,
-            perturbation=perturbation,
-            perturbation_config=perturbation_config,
+            dataset_spec=dataset_spec,
+            perturbation=scenario.perturbation,
+            scenario_config=scenario_config,
             extraction_config=extraction_config,
         )
 
@@ -650,44 +861,46 @@ def run_single_model_experiment(
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    # -----------------------------------------------------
-    # 2. Evaluate original first
-    # -----------------------------------------------------
-    original_config = build_perturbation_config("original", transform_hparams)
-
-    original_record = evaluate_saved_perturbation(
-        root_dir=extraction_config.root_dir,
-        model_name=model_spec.model_name,
-        pretrained_weight=model_spec.pretrained_weight,
+    # 2. Evaluate all scenarios
+    id_dataset_spec = get_dataset_spec_by_name(data_config, id_dataset_name)
+    id_clean_config = build_scenario_config(
+        dataset_spec=id_dataset_spec,
         perturbation="original",
-        perturbation_config=original_config,
-        original_config=original_config,
-        original_accuracy=None,
+        hparams=transform_hparams,
     )
 
-    result.original_accuracy = original_record.accuracy
-    result.perturbations["original"] = original_record
+    for scenario in scenarios:
+        dataset_spec = get_dataset_spec_by_name(data_config, scenario.dataset_name)
 
-    # -----------------------------------------------------
-    # 3. Evaluate perturbed runs against original
-    # -----------------------------------------------------
-    for perturbation in perturbations:
-        if perturbation == "original":
-            continue
+        scenario_config = build_scenario_config(
+            dataset_spec=dataset_spec,
+            perturbation=scenario.perturbation,
+            hparams=transform_hparams,
+        )
 
-        perturbation_config = build_perturbation_config(perturbation, transform_hparams)
+        same_dataset_clean_config = build_scenario_config(
+            dataset_spec=dataset_spec,
+            perturbation="original",
+            hparams=transform_hparams,
+        )
 
-        record = evaluate_saved_perturbation(
+        record = evaluate_saved_scenario(
             root_dir=extraction_config.root_dir,
             model_name=model_spec.model_name,
             pretrained_weight=model_spec.pretrained_weight,
-            perturbation=perturbation,
-            perturbation_config=perturbation_config,
-            original_config=original_config,
-            original_accuracy=result.original_accuracy,
+            dataset_spec=dataset_spec,
+            perturbation=scenario.perturbation,
+            scenario_config=scenario_config,
+            same_dataset_clean_config=same_dataset_clean_config,
+            id_clean_dataset_spec=id_dataset_spec,
+            id_clean_config=id_clean_config,
         )
 
-        result.perturbations[perturbation] = record
+        scenario_name = scenario.scenario_name or get_scenario_name(
+            scenario.dataset_name,
+            scenario.perturbation,
+        )
+        result.scenario_results[scenario_name] = record
 
     return result
 
@@ -709,6 +922,7 @@ def run_experiments(
     transform_hparams: TransformHyperParams,
     data_config: DataConfig,
     extraction_config: ExtractionConfig,
+    scenarios: Optional[List[EvalScenario]] = None,
     perturbations: Optional[List[str]] = None,
     verbose_image: bool = False,
     plot_seconds: int = 10,
@@ -716,8 +930,9 @@ def run_experiments(
     summary_name: str = "experiment_summary.json",
     run_validation: bool = True,
     validation_max_samples: Optional[int] = None,
+    id_dataset_name: str = "imagenet",
 ) -> ExperimentResult:
-    
+
     if perturbations is None:
         perturbations = [
             "original",
@@ -729,20 +944,21 @@ def run_experiments(
             "localwarp",
         ]
 
+    if scenarios is None:
+        scenarios = build_default_scenarios(data_config, perturbations)
+
     output = ExperimentResult(
         transform_hparams=transform_hparams,
         data_config=data_config,
         extraction_config=extraction_config,
+        scenarios=scenarios,
     )
-    
+
     root = Path(extraction_config.root_dir) / "MetaData"
     trial_id = get_next_trial_id(root)
-
     run_dir = root / f"trial_{trial_id:04d}"
-    
-    # =====================================================
-    # 1) perturbation validation 먼저 수행
-    # =====================================================
+
+    # Perturbation validation: run only on ID dataset assumption
     if run_validation:
         print(f"\n{'='*20} Perturbation Validation {'='*20}")
         output.perturbation_validation = run_perturbation_validation(
@@ -750,7 +966,7 @@ def run_experiments(
             perturbations=perturbations,
             max_samples=validation_max_samples,
         )
-        
+
     for model_spec in model_specs:
         print(f"\n{'='*20} {model_spec.model_name} / {model_spec.pretrained_weight} {'='*20}")
 
@@ -759,36 +975,50 @@ def run_experiments(
             transform_hparams=transform_hparams,
             data_config=data_config,
             extraction_config=extraction_config,
-            perturbations=perturbations,
+            scenarios=scenarios,
             verbose_image=verbose_image,
-            plot_seconds = plot_seconds,
-            run_dir=run_dir
+            plot_seconds=plot_seconds,
+            run_dir=run_dir,
+            id_dataset_name=id_dataset_name,
         )
 
         output.model_results[f"{model_spec.model_name}__{model_spec.pretrained_weight}"] = model_result
-
+        
         print()
-        print(f"Original Acc: {model_result.original_accuracy:.6f}")
-
-        for name, record in model_result.perturbations.items():
-            if name == "original":
-                continue
-
+        print(
+            f"{'scenario':^24s} | "
+            f"{'Accuracy':^13s} | "
+            f"{'Rel Accuracy':^13s} | "
+            f"{'js':^13s} | "
+            f"{'cka':^13s} | "
+            f"{'drop_same':^13s} | "
+            f"{'drop_id':^13s}"
+        )
+        print("-" * 120)
+        for name, record in model_result.scenario_results.items():
             acc = f"{record.accuracy:.6f}" if record.accuracy is not None else "None"
             rel = f"{record.relative_accuracy_score:.6f}" if record.relative_accuracy_score is not None else "None"
-            js  = f"{record.js_divergence:.6f}" if record.js_divergence is not None else "None"
+            js = f"{record.js_divergence:.6f}" if record.js_divergence is not None else "None"
             cka = f"{record.cka:.6f}" if record.cka is not None else "None"
+            drop_same = (
+                f"{record.accuracy_drop_vs_same_dataset_clean:.6f}"
+                if record.accuracy_drop_vs_same_dataset_clean is not None else "None"
+            )
+            drop_id = (
+                f"{record.accuracy_drop_vs_id_clean:.6f}"
+                if record.accuracy_drop_vs_id_clean is not None else "None"
+            )
 
             print(
-                f"{name:14s} | "
-                f"acc={acc} | "
-                f"rel_acc={rel} | "
-                f"js={js} | "
-                f"cka={cka} | "
-                f"hash={record.config_hash}"
+                f"{name:24s} | "
+                f"{acc:>13s} | "
+                f"{rel:>13s} | "
+                f"{js:>13s} | "
+                f"{cka:>13s} | "
+                f"{drop_same:>13s} | "
+                f"{drop_id:>13s}"
             )
-            
-    # TODO Trial{id}\Experiment구조로 리팩토링
+
     if save_summary:
         summary_path = Path(run_dir) / summary_name
         save_json(output.to_jsonable(), summary_path)
