@@ -14,6 +14,7 @@ if __name__ == "__main__":
     resnet = timm.create_model("resnet50", pretrained=True)
     vit = timm.create_model("vit_base_patch16_224.augreg_in1k", pretrained=True)
     i = 0
+    print()
     for alpha in alpha_grid:
         for sigma in sigma_grid:
             i += 1
@@ -114,6 +115,6 @@ if __name__ == "__main__":
                 ],
                 id_dataset_name="imagenet",
                 run_validation= True,
-                validation_max_samples = 800, # 최종 실험시에는 None으로
+                validation_max_samples = 10000, # 최종 실험시에는 None으로
             )
             print()
