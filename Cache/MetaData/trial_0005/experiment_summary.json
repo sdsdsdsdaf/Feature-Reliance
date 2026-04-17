@@ -1,0 +1,339 @@
+{
+  "transform_hparams": {
+    "resize_size": 224,
+    "p": 1.0,
+    "prefix": "resizecrop",
+    "bilateral_d": 11,
+    "sigma_color": 170,
+    "sigma_space": 75,
+    "gaussian_k": 11,
+    "gaussian_sigma": 2.0,
+    "nlmeans_h": 20,
+    "template_window_size": 11,
+    "search_window_size": 11,
+    "gray_alpha": 1.0,
+    "grid_size": 6,
+    "alpha_localwarp": 0,
+    "sigma_localwarp": 3.5
+  },
+  "data_config": {
+    "batch_size": 512,
+    "num_workers": 4,
+    "pin_memory": false,
+    "shuffle": false,
+    "datasets": [
+      {
+        "name": "imagenet",
+        "dataset_type": "imagenet_val_flat",
+        "root": "Data",
+        "split": "val",
+        "num_classes": 1000,
+        "domain_type": "id",
+        "shift_type": null,
+        "class_map_name": null,
+        "eval_protocol_name": null
+      }
+    ]
+  },
+  "extraction_config": {
+    "root_dir": "Cache",
+    "device": "cuda:0",
+    "dtype": "float16",
+    "overwrite": false,
+    "debug_first_batch": false
+  },
+  "scenarios": [
+    {
+      "dataset_name": "imagenet",
+      "perturbation": "original",
+      "scenario_name": "imagenet__original",
+      "normalize": true
+    },
+    {
+      "dataset_name": "imagenet",
+      "perturbation": "grayscale",
+      "scenario_name": "imagenet__grayscale",
+      "normalize": true
+    },
+    {
+      "dataset_name": "imagenet",
+      "perturbation": "bilateral",
+      "scenario_name": "imagenet__bilateral",
+      "normalize": true
+    },
+    {
+      "dataset_name": "imagenet",
+      "perturbation": "patchshuffle",
+      "scenario_name": "imagenet__patchshuffle",
+      "normalize": true
+    },
+    {
+      "dataset_name": "imagenet",
+      "perturbation": "patchrotation",
+      "scenario_name": "imagenet__patchrotation",
+      "normalize": true
+    },
+    {
+      "dataset_name": "imagenet",
+      "perturbation": "localwarp",
+      "scenario_name": "imagenet__localwarp",
+      "normalize": true
+    }
+  ],
+  "model_results": {
+    "resnet50__in1k": {
+      "model_name": "resnet50",
+      "pretrained_weight": "in1k",
+      "scenario_results": {
+        "imagenet__original": {
+          "scenario_name": "imagenet__original",
+          "dataset_name": "imagenet",
+          "perturbation": "original",
+          "config_hash": "be0c4f401fe1",
+          "save_dir": "Cache/resnet50/in1k/imagenet/val/original/be0c4f401fe1",
+          "accuracy": 0.7828199863433838,
+          "relative_accuracy_score": null,
+          "js_divergence": null,
+          "cka": null,
+          "accuracy_drop_vs_same_dataset_clean": null,
+          "accuracy_drop_vs_id_clean": 0.0,
+          "ood_gap_vs_id_clean": 0.0,
+          "intervention_gain_vs_same_dataset_clean": null
+        },
+        "imagenet__grayscale": {
+          "scenario_name": "imagenet__grayscale",
+          "dataset_name": "imagenet",
+          "perturbation": "grayscale",
+          "config_hash": "cecf3e59d0a1",
+          "save_dir": "Cache/resnet50/in1k/imagenet/val/grayscale/cecf3e59d0a1",
+          "accuracy": 0.6854999661445618,
+          "relative_accuracy_score": 0.8755211917080896,
+          "js_divergence": 0.11921820789575577,
+          "cka": 0.7071657180786133,
+          "accuracy_drop_vs_same_dataset_clean": 0.09732002019882202,
+          "accuracy_drop_vs_id_clean": 0.09732002019882202,
+          "ood_gap_vs_id_clean": -0.09732002019882202,
+          "intervention_gain_vs_same_dataset_clean": -0.09732002019882202
+        },
+        "imagenet__bilateral": {
+          "scenario_name": "imagenet__bilateral",
+          "dataset_name": "imagenet",
+          "perturbation": "bilateral",
+          "config_hash": "d9cd49e15c34",
+          "save_dir": "Cache/resnet50/in1k/imagenet/val/bilateral/d9cd49e15c34",
+          "accuracy": 0.5935400128364563,
+          "relative_accuracy_score": 0.7578982671034024,
+          "js_divergence": 0.19808423519134521,
+          "cka": 0.6074808239936829,
+          "accuracy_drop_vs_same_dataset_clean": 0.1892799735069275,
+          "accuracy_drop_vs_id_clean": 0.1892799735069275,
+          "ood_gap_vs_id_clean": -0.1892799735069275,
+          "intervention_gain_vs_same_dataset_clean": -0.1892799735069275
+        },
+        "imagenet__patchshuffle": {
+          "scenario_name": "imagenet__patchshuffle",
+          "dataset_name": "imagenet",
+          "perturbation": "patchshuffle",
+          "config_hash": "3bcf30961bcf",
+          "save_dir": "Cache/resnet50/in1k/imagenet/val/patchshuffle/3bcf30961bcf",
+          "accuracy": 0.5381199717521667,
+          "relative_accuracy_score": 0.6870123316548956,
+          "js_divergence": 0.23894403874874115,
+          "cka": 0.5142999291419983,
+          "accuracy_drop_vs_same_dataset_clean": 0.24470001459121704,
+          "accuracy_drop_vs_id_clean": 0.24470001459121704,
+          "ood_gap_vs_id_clean": -0.24470001459121704,
+          "intervention_gain_vs_same_dataset_clean": -0.24470001459121704
+        },
+        "imagenet__patchrotation": {
+          "scenario_name": "imagenet__patchrotation",
+          "dataset_name": "imagenet",
+          "perturbation": "patchrotation",
+          "config_hash": "eaccd8dda50f",
+          "save_dir": "Cache/resnet50/in1k/imagenet/val/patchrotation/eaccd8dda50f",
+          "accuracy": 0.3371399939060211,
+          "relative_accuracy_score": 0.42994551147018745,
+          "js_divergence": 0.40530091524124146,
+          "cka": 0.3487895131111145,
+          "accuracy_drop_vs_same_dataset_clean": 0.44567999243736267,
+          "accuracy_drop_vs_id_clean": 0.44567999243736267,
+          "ood_gap_vs_id_clean": -0.44567999243736267,
+          "intervention_gain_vs_same_dataset_clean": -0.44567999243736267
+        },
+        "imagenet__localwarp": {
+          "scenario_name": "imagenet__localwarp",
+          "dataset_name": "imagenet",
+          "perturbation": "localwarp",
+          "config_hash": "dfd96364f741",
+          "save_dir": "Cache/resnet50/in1k/imagenet/val/localwarp/dfd96364f741",
+          "accuracy": 0.7828199863433838,
+          "relative_accuracy_score": 1.0,
+          "js_divergence": -2.4100597819515235e-12,
+          "cka": 1.0,
+          "accuracy_drop_vs_same_dataset_clean": 0.0,
+          "accuracy_drop_vs_id_clean": 0.0,
+          "ood_gap_vs_id_clean": 0.0,
+          "intervention_gain_vs_same_dataset_clean": 0.0
+        }
+      }
+    },
+    "vit-b__augreg_in1k": {
+      "model_name": "vit-b",
+      "pretrained_weight": "augreg_in1k",
+      "scenario_results": {
+        "imagenet__original": {
+          "scenario_name": "imagenet__original",
+          "dataset_name": "imagenet",
+          "perturbation": "original",
+          "config_hash": "be0c4f401fe1",
+          "save_dir": "Cache/vit-b/augreg_in1k/imagenet/val/original/be0c4f401fe1",
+          "accuracy": 0.7815999984741211,
+          "relative_accuracy_score": null,
+          "js_divergence": null,
+          "cka": null,
+          "accuracy_drop_vs_same_dataset_clean": null,
+          "accuracy_drop_vs_id_clean": 0.0,
+          "ood_gap_vs_id_clean": 0.0,
+          "intervention_gain_vs_same_dataset_clean": null
+        },
+        "imagenet__grayscale": {
+          "scenario_name": "imagenet__grayscale",
+          "dataset_name": "imagenet",
+          "perturbation": "grayscale",
+          "config_hash": "cecf3e59d0a1",
+          "save_dir": "Cache/vit-b/augreg_in1k/imagenet/val/grayscale/cecf3e59d0a1",
+          "accuracy": 0.6515799760818481,
+          "relative_accuracy_score": 0.8334357895895084,
+          "js_divergence": 0.13999512791633606,
+          "cka": 0.8257477879524231,
+          "accuracy_drop_vs_same_dataset_clean": 0.13002002239227295,
+          "accuracy_drop_vs_id_clean": 0.13002002239227295,
+          "ood_gap_vs_id_clean": -0.13002002239227295,
+          "intervention_gain_vs_same_dataset_clean": -0.13002002239227295
+        },
+        "imagenet__bilateral": {
+          "scenario_name": "imagenet__bilateral",
+          "dataset_name": "imagenet",
+          "perturbation": "bilateral",
+          "config_hash": "d9cd49e15c34",
+          "save_dir": "Cache/vit-b/augreg_in1k/imagenet/val/bilateral/d9cd49e15c34",
+          "accuracy": 0.627079963684082,
+          "relative_accuracy_score": 0.8020496603995807,
+          "js_divergence": 0.15422293543815613,
+          "cka": 0.8227548599243164,
+          "accuracy_drop_vs_same_dataset_clean": 0.15452003479003906,
+          "accuracy_drop_vs_id_clean": 0.15452003479003906,
+          "ood_gap_vs_id_clean": -0.15452003479003906,
+          "intervention_gain_vs_same_dataset_clean": -0.15452003479003906
+        },
+        "imagenet__patchshuffle": {
+          "scenario_name": "imagenet__patchshuffle",
+          "dataset_name": "imagenet",
+          "perturbation": "patchshuffle",
+          "config_hash": "3bcf30961bcf",
+          "save_dir": "Cache/vit-b/augreg_in1k/imagenet/val/patchshuffle/3bcf30961bcf",
+          "accuracy": 0.48263999819755554,
+          "relative_accuracy_score": 0.6170125533423546,
+          "js_divergence": 0.2769523561000824,
+          "cka": 0.701383113861084,
+          "accuracy_drop_vs_same_dataset_clean": 0.29896000027656555,
+          "accuracy_drop_vs_id_clean": 0.29896000027656555,
+          "ood_gap_vs_id_clean": -0.29896000027656555,
+          "intervention_gain_vs_same_dataset_clean": -0.29896000027656555
+        },
+        "imagenet__patchrotation": {
+          "scenario_name": "imagenet__patchrotation",
+          "dataset_name": "imagenet",
+          "perturbation": "patchrotation",
+          "config_hash": "eaccd8dda50f",
+          "save_dir": "Cache/vit-b/augreg_in1k/imagenet/val/patchrotation/eaccd8dda50f",
+          "accuracy": 0.4232199788093567,
+          "relative_accuracy_score": 0.5408915957400612,
+          "js_divergence": 0.32589462399482727,
+          "cka": 0.6509007811546326,
+          "accuracy_drop_vs_same_dataset_clean": 0.3583800196647644,
+          "accuracy_drop_vs_id_clean": 0.3583800196647644,
+          "ood_gap_vs_id_clean": -0.3583800196647644,
+          "intervention_gain_vs_same_dataset_clean": -0.3583800196647644
+        },
+        "imagenet__localwarp": {
+          "scenario_name": "imagenet__localwarp",
+          "dataset_name": "imagenet",
+          "perturbation": "localwarp",
+          "config_hash": "dfd96364f741",
+          "save_dir": "Cache/vit-b/augreg_in1k/imagenet/val/localwarp/dfd96364f741",
+          "accuracy": 0.7815999984741211,
+          "relative_accuracy_score": 1.0,
+          "js_divergence": 0.0,
+          "cka": 1.0,
+          "accuracy_drop_vs_same_dataset_clean": 0.0,
+          "accuracy_drop_vs_id_clean": 0.0,
+          "ood_gap_vs_id_clean": 0.0,
+          "intervention_gain_vs_same_dataset_clean": 0.0
+        }
+      }
+    }
+  },
+  "perturbation_validation": {
+    "grayscale": {
+      "perturbation": "grayscale",
+      "config_hash": "ba8576f999a8",
+      "metrics": {
+        "LV_ratio": 0.9999988508923856,
+        "HFE_ratio": 0.9999996212368398,
+        "ESSIM": 1.0,
+        "GC": 1.0,
+        "texture_score": 0.9999992360646127,
+        "shape_score": 1.0
+      }
+    },
+    "bilateral": {
+      "perturbation": "bilateral",
+      "config_hash": "4154e61e3944",
+      "metrics": {
+        "LV_ratio": 0.5338767207918894,
+        "HFE_ratio": 0.4723958339181298,
+        "ESSIM": 0.5496515433110468,
+        "GC": 0.8652083957311962,
+        "texture_score": 0.5031362773550095,
+        "shape_score": 0.7074299695211216
+      }
+    },
+    "patchshuffle": {
+      "perturbation": "patchshuffle",
+      "config_hash": "6ce7e514fdbf",
+      "metrics": {
+        "LV_ratio": 0.9999594448689002,
+        "HFE_ratio": 0.9999967682317249,
+        "ESSIM": 0.22706343587137007,
+        "GC": 0.09780193165386675,
+        "texture_score": 0.9999781065503125,
+        "shape_score": 0.1624326837626184
+      }
+    },
+    "patchrotation": {
+      "perturbation": "patchrotation",
+      "config_hash": "ab45851c14ae",
+      "metrics": {
+        "LV_ratio": 0.9185591669108686,
+        "HFE_ratio": 0.9081399891552501,
+        "ESSIM": 0.36641096158249464,
+        "GC": 0.21281549208871142,
+        "texture_score": 0.9133495780330594,
+        "shape_score": 0.28961322683560303
+      }
+    },
+    "localwarp": {
+      "perturbation": "localwarp",
+      "config_hash": "e4e45aa47fb6",
+      "metrics": {
+        "LV_ratio": 0.9999988508923856,
+        "HFE_ratio": 0.9999996212368398,
+        "ESSIM": 1.0,
+        "GC": 1.0,
+        "texture_score": 0.9999992360646127,
+        "shape_score": 1.0
+      }
+    }
+  }
+}
