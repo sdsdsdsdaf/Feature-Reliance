@@ -16,6 +16,8 @@ import matplotlib.pyplot as plt
 from tqdm.auto import tqdm
 from torch.utils.data import DataLoader
 from pprint import pprint
+from torchvision.datasets import ImageFolder
+from timm.data.imagenet_info import ImageNetInfo
 
 
 try:
@@ -34,12 +36,12 @@ try:
         ScenarioRecord
     )
     from Utils.transfrom import get_transform
-    from Utils.Dataset import ImageNetValFlatDataset
+    from Utils.Dataset import ImageNetValFlatDataset, ImageFolderDS, ImageNetValSubsetDataset
     from Utils.metric import relative_accuracy
     from Utils.metric import compute_dataset_metrics
     from Utils.metric import linear_cka, js_divergence
 except:
-    from Utils.Config import (
+    from Config import (
         TransformHyperParams,
         DataConfig,
         ExtractionConfig,
@@ -54,18 +56,36 @@ except:
         ScenarioRecord
     )
     from transfrom import get_transform
-    from Dataset import ImageNetValFlatDataset
+    from Dataset import ImageNetValFlatDataset, ImageFolderDS,  ImageNetValSubsetDataset
     from metric import relative_accuracy
     from metric import compute_dataset_metrics
-    from Utils.metric import linear_cka, js_divergence
+    from metric import linear_cka, js_divergence
+
 
 # =========================================================
 # Evaluation Protocol / Class Mapping
 # =========================================================
 
+dataset = ImageFolder(root="Data/imagenet-r")
+
+info = ImageNetInfo("imagenet-1k")
+imagenet_wnids = info.label_names()
+
+wnid_to_1k = {wnid: i for i, wnid in enumerate(imagenet_wnids)}
+
 IMAGENET_R_CLASS_IDS = [
-    # TODO: fill with the official 1k-class indices used by ImageNet-R
+    wnid_to_1k[wnid]
+    for wnid in dataset.classes
 ]
+
+assert len(IMAGENET_R_CLASS_IDS) == 200, f"Expected 200 classes, got {len(IMAGENET_R_CLASS_IDS)}"
+assert len(set(IMAGENET_R_CLASS_IDS)) == 200, "Duplicate class IDs detected"
+
+
+for wnid, idx in zip(dataset.classes, IMAGENET_R_CLASS_IDS):
+    assert imagenet_wnids[idx] == wnid, f"Mismatch: {wnid} != {imagenet_wnids[idx]}"
+    
+del dataset, info, wnid_to_1k
 
 CLASS_MAPPING_REGISTRY = {
     "imagenet_r_subset_map": {
@@ -208,22 +228,15 @@ def cal_accuracy(
 
     # Example: subset evaluation such as ImageNet-R
     if "subset_class_ids" in mapping:
-        subset_class_ids = mapping["subset_class_ids"]
-        subset_idx = torch.tensor(subset_class_ids, device=logits.device, dtype=torch.long)
+        subset_idx = torch.tensor(mapping["subset_class_ids"], device=logits.device)
+        logits_subset = logits.index_select(1, subset_idx)
+        preds_local = logits_subset.argmax(dim=1)
 
-        logits_subset = logits.index_select(dim=1, index=subset_idx)
-        preds_subset_local = torch.argmax(logits_subset, dim=1)
-        preds_global = subset_idx[preds_subset_local]
-
-        valid_mask = torch.isin(labels.to(logits.device), subset_idx)
-
-        if valid_mask.sum().item() == 0:
-            raise ValueError("No valid labels found for subset evaluation.")
-
-        correct = (preds_global[valid_mask] == labels.to(logits.device)[valid_mask]).float().mean().item()
+        # labels가 local 0..199인 경우
+        correct = (preds_local == labels.to(logits.device)).float().mean().item()
         return correct
-
-    raise ValueError(f"Unsupported mapping format for {class_map_name}")
+    else:
+        raise ValueError(f"Unsupported mapping format for {class_map_name}")
 
 def maybe_save_tensors(
     save_dir: Path,
@@ -395,10 +408,21 @@ def build_dataset(dataset_spec: DatasetSpec, transform):
 
     # TODO: implement actual dataset classes
     elif dataset_spec.dataset_type == "imagenet_r":
-        return NotImplementedError("ImageNet-R is Not Impelemented")
+        return ImageFolderDS(dataset_spec.root, transform=transform)
+    
+    elif dataset_spec.dataset_type == "imagenet_val_subset":
+        if dataset_spec.sample_indices is None:
+            raise ValueError("sample_indices must be provided for imagenet_val_subset")
+
+        return ImageNetValSubsetDataset(
+            indices=dataset_spec.sample_indices,
+            root=dataset_spec.root,
+            transform=transform,
+            class_ids=dataset_spec.labels_map
+        )
 
     elif dataset_spec.dataset_type == "stylized_imagenet":
-        return NotImplementedError("ImageNet-C Not Implemeted   ")
+        raise NotImplementedError("ImageNet-C Not Implemeted   ")
 
     else:
         raise ValueError(f"Unsupported dataset_type: {dataset_spec.dataset_type}")
@@ -1024,7 +1048,7 @@ def run_experiments(
         
         print()
         print(
-            f"{'scenario':^24s} | "
+            f"{'scenario':^27s} | "
             f"{'Accuracy':^13s} | "
             f"{'Rel Accuracy':^13s} | "
             f"{'js':^13s} | "
@@ -1032,7 +1056,7 @@ def run_experiments(
             f"{'drop_same':^13s} | "
             f"{'drop_id':^13s}"
         )
-        print("-" * 120)
+        print("-" * 122)
         for name, record in model_result.scenario_results.items():
             acc = f"{record.accuracy:.6f}" if record.accuracy is not None else "None"
             rel = f"{record.relative_accuracy_score:.6f}" if record.relative_accuracy_score is not None else "None"
@@ -1048,7 +1072,7 @@ def run_experiments(
             )
 
             print(
-                f"{name:24s} | "
+                f"{name:27s} | "
                 f"{acc:>13s} | "
                 f"{rel:>13s} | "
                 f"{js:>13s} | "

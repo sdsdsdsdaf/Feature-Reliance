@@ -38,6 +38,8 @@ class DatasetSpec:
     root: Optional[str] = None
     split: str = "val"
     num_classes: int = 1000
+    sample_indices: List[int] = field(default_factory=list)
+    labels_map: List[int] = field(default_factory=list)
 
     # Metadata for analysis
     domain_type: str = "id"             # "id", "natural_ood", "synthetic_ood"

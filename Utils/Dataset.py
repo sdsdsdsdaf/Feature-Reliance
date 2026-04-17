@@ -4,7 +4,7 @@ import numpy
 import albumentations as A
 import timm
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, List, Sequence
 
 from PIL import Image
 from torch.utils.data import Dataset
@@ -13,6 +13,7 @@ from datasets import load_dataset
 from scipy.io import loadmat
 import pkgutil
 from timm.data import ImageNetInfo
+from torchvision.datasets import ImageFolder
 
 def build_imagenet_label_mapping(devkit_dir: str):
     devkit_dir = Path(devkit_dir)
@@ -155,46 +156,63 @@ class ImageNetValFlatDataset(Dataset):
     def index_to_description(self, index: int) -> str:
         return self.index_to_description_map[index]
 
+class ImageNetValSubsetDataset(Dataset):
+    def __init__(
+        self,
+        indices: Sequence[int],
+        class_ids: Sequence[int],
+        root: Optional[str] = None,
+        transform=None,
+    ):
+        self.base_ds = (
+            ImageNetValFlatDataset(root=root, transform=transform)
+            if root is not None
+            else ImageNetValFlatDataset(transform=transform)
+        )
+        self.indices = list(indices)
+        self.class_ids = list(class_ids)
+        self.class_id_to_subset_idx = {
+            class_id: i for i, class_id in enumerate(self.class_ids)
+        }
 
-class UnifiedDataset(Dataset):
-    def __init__(self, ds=None, transform=None, ds_name="imagenet-1k", split="validation"):
-        self.ds = ds
-        
-        if self.ds == None and not ds_name=="imagenet-r":
-            self.ds = load_dataset(ds_name, split=split)
-        
-        self.transform = transform
-        if transform is None:
-            raise ValueError("Not Allow Transform is None")
-        
-
-        # HF Dataset Check
-        self.is_hf = hasattr(ds, "features")
-
-        if self.is_hf:
-            label_feature = ds.features["label"]
-            self.class_num = label_feature.num_classes
-            self.class_names = label_feature.names
-        else:
-            self.class_num = len(ds.classes)
-            self.class_names = ds.classes
-    
-    
     def __len__(self):
-        return len(self.ds)
+        return len(self.indices)
 
     def __getitem__(self, idx):
-        if self.is_hf:
-            item = self.ds[idx]
-            image = item["image"]
-            label = item["label"]
-        else:
-            image, label = self.ds[idx]
-
-        if self.transform:
-            image = self.transform(image)
-
+        image, label = self.base_ds[self.indices[idx]]
+        label = self.class_id_to_subset_idx[label]
         return image, label
+
+
+def build_sample_indices_from_targets(
+    targets: Sequence[int],
+    class_ids: Sequence[int],
+) -> List[int]:
+    class_id_set = set(int(x) for x in class_ids)
+    return [i for i, y in enumerate(targets) if int(y) in class_id_set]
+
+class ImageFolderDS(Dataset):
+    
+    def __init__(self, root:str, transform=None):
+        super().__init__()
+        
+        self.ds = ImageFolder(root)
+        self.transform = transform
+        self.root = root
+        self.classes = self.ds.classes
+        self.class_to_idx = self.ds.class_to_idx
+        
+    def __len__(self):
+        return len(self.ds)
+    
+    def __getitem__(self, index):
+        image, label = self.ds[index]
+        arr = np.array(image)
+        
+        if self.transform is not None:
+            arr = self.transform(arr)
+            
+        return arr, label
     
     
 if __name__ == "__main__":
