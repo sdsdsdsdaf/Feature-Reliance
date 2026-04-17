@@ -2,3 +2,9 @@ Data/*
 Cache/*
 /**/__pycache__/*
 *.png
+
+# 2. MetaData 폴더는 제외 (살림)
+!Cache/MetaData/
+
+# 3. 그 안의 내용도 포함시키기 (중요)
+!Cache/MetaData/**
