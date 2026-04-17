@@ -2,7 +2,8 @@ import timm
 import torch
 
 from Utils.Config import *
-from Utils.utils import run_experiments, set_seed, get_system_info
+from Utils.Dataset import ImageNetValFlatDataset, build_sample_indices_from_targets
+from Utils.utils import IMAGENET_R_CLASS_IDS, run_experiments, set_seed, get_system_info
 
 alpha_grid = [0, 5, 10, 20, 35, 50, 80]
 sigma_grid = [0.5, 1.0, 2.0, 3.5, 6.0]
@@ -12,6 +13,12 @@ if __name__ == "__main__":
     set_seed(42)
     
     get_system_info()
+    base_ds = ImageNetValFlatDataset(root="Data", transform=None)
+    imagenet_200_indices = build_sample_indices_from_targets(
+        targets=base_ds.targets,
+        class_ids=IMAGENET_R_CLASS_IDS,
+    )
+    del base_ds
     
     resnet = timm.create_model("resnet50", pretrained=True)
     vit = timm.create_model("vit_base_patch16_224.augreg_in1k", pretrained=True)
@@ -41,7 +48,7 @@ if __name__ == "__main__":
             ]
 
             transform_hparams = TransformHyperParams(
-                resize_size=224,
+                resize_size=256,
                 p=1.0,
                 prefix="resizecrop",
                 bilateral_d=11,
@@ -69,18 +76,31 @@ if __name__ == "__main__":
                         num_classes=1000,
                         domain_type="id",
                     ),
+                    
+                    DatasetSpec(
+                        name="imagenet_200",
+                        dataset_type="imagenet_val_subset",
+                        root="Data",
+                        split="val",
+                        num_classes=200,
+                        domain_type="id",
+                        class_map_name="imagenet_r_subset_map",
+                        sample_indices=imagenet_200_indices,
+                        labels_map=IMAGENET_R_CLASS_IDS
+                    ),
+                    
                     # OOD dataset 추가 시
-                    # DatasetSpec(
-                    #     name="imagenet_r",
-                    #     dataset_type="imagenet_r",
-                    #     root="Data/ImageNet-R",
-                    #     split="val",
-                    #     num_classes=1000,
-                    #     domain_type="natural_ood",
-                    #     shift_type="style",
-                    #     class_map_name="imagenet_r_subset_map",
-                    #     eval_protocol_name="imagenet_r_eval",
-                    # ),
+                    DatasetSpec(
+                        name="imagenet_r",
+                        dataset_type="imagenet_r",
+                        root="Data/imagenet-r",
+                        split="val",
+                        num_classes=200,
+                        domain_type="natural_ood",
+                        shift_type="style",
+                        class_map_name="imagenet_r_subset_map",
+                        eval_protocol_name="imagenet_r_eval",
+                    ),
                 ],
             )
 
@@ -115,9 +135,9 @@ if __name__ == "__main__":
                     "patchrotation",
                     "localwarp",
                 ],
-                id_dataset_name="imagenet",
+                id_dataset_name="imagenet_200",
                 verbose_image=True,
-                run_validation= True,
+                run_validation= False,
                 validation_max_samples = 10000, # 최종 실험시에는 None으로
             )
             print()
