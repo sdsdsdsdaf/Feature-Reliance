@@ -185,3 +185,48 @@ class ExperimentResult:
                 else None
             ),
         }
+        
+    @classmethod
+    def from_jsonable(cls, d: Dict[str, Any]) -> "ExperimentResult":
+        return cls(
+            transform_hparams=TransformHyperParams(**d["transform_hparams"]),
+            data_config=DataConfig(
+                batch_size=d["data_config"].get("batch_size", 512),
+                num_workers=d["data_config"].get("num_workers", 4),
+                pin_memory=d["data_config"].get("pin_memory", True),
+                shuffle=d["data_config"].get("shuffle", False),
+                datasets=[
+                    DatasetSpec(**x)
+                    for x in d["data_config"].get("datasets", [])
+                ],
+            ),
+            extraction_config=ExtractionConfig(**d["extraction_config"]),
+            scenarios=[
+                EvalScenario(**x)
+                for x in d.get("scenarios", [])
+            ],
+            perturbation_validation=(
+                PerturbationValidationResult(
+                    results={
+                        k: PerturbationMetricResult(**v)
+                        for k, v in d["perturbation_validation"].items()
+                    }
+                )
+                if d.get("perturbation_validation") is not None
+                else None
+            ),
+            model_results={
+                k: ModelRunResult(
+                    model_name=v["model_name"],
+                    pretrained_weight=v["pretrained_weight"],
+                    scenario_results={
+                        sk: ScenarioRecord(**sv)
+                        for sk, sv in v.get("scenario_results", {}).items()
+                    },
+                )
+                for k, v in d.get("model_results", {}).items()
+            },
+        )
+            
+
+
