@@ -82,6 +82,7 @@ class EvalScenario:
     perturbation: str = "original"
     scenario_name: Optional[str] = None
     normalize: bool = True
+    id_dataset_name: str = None
 
 
 

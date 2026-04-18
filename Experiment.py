@@ -75,6 +75,7 @@ if __name__ == "__main__":
                         split="val",
                         num_classes=1000,
                         domain_type="id",
+                        id_dataset_name="imagenet"
                     ),
                     
                     DatasetSpec(
@@ -86,7 +87,8 @@ if __name__ == "__main__":
                         domain_type="id",
                         class_map_name="imagenet_r_subset_map",
                         sample_indices=imagenet_200_indices,
-                        labels_map=IMAGENET_R_CLASS_IDS
+                        labels_map=IMAGENET_R_CLASS_IDS,
+                        id_dataset_name="imagenet_200"
                     ),
                     
                     # OOD dataset 추가 시
@@ -100,6 +102,7 @@ if __name__ == "__main__":
                         shift_type="style",
                         class_map_name="imagenet_r_subset_map",
                         eval_protocol_name="imagenet_r_eval",
+                        id_dataset_name="imagenet_200"
                     ),
                 ],
             )
@@ -135,9 +138,8 @@ if __name__ == "__main__":
                     "patchrotation",
                     "localwarp",
                 ],
-                id_dataset_name="imagenet_200",
                 verbose_image=True,
-                run_validation= False,
+                run_validation= True,
                 validation_max_samples = 10000, # 최종 실험시에는 None으로
             )
             print()

@@ -860,7 +860,7 @@ def run_single_model_experiment(
     verbose_image: bool = False,
     plot_seconds: int = 10,
     run_dir: Optional[str] = None,
-    id_dataset_name: str = "imagenet",
+    id_dataset_name: str = None,
 ) -> ModelRunResult:
 
     result = ModelRunResult(
@@ -868,7 +868,7 @@ def run_single_model_experiment(
         pretrained_weight=model_spec.pretrained_weight,
     )
 
-    # Optional visualization only for the first ID dataset
+    # Optional visualization only for the first scenario dataset
     if verbose_image:
         first_dataset_spec = get_dataset_spec_by_name(data_config, scenarios[0].dataset_name)
         vis_perturbations = sorted(list({s.perturbation for s in scenarios if s.dataset_name == first_dataset_spec.name}))
@@ -923,15 +923,8 @@ def run_single_model_experiment(
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    # 2. Evaluate all scenarios
-    id_dataset_spec = get_dataset_spec_by_name(data_config, id_dataset_name)
-    id_clean_config = build_scenario_config(
-        dataset_spec=id_dataset_spec,
-        perturbation="original",
-        hparams=transform_hparams,
-    )
-
     for scenario in scenarios:
+        
         dataset_spec = get_dataset_spec_by_name(data_config, scenario.dataset_name)
 
         scenario_config = build_scenario_config(
@@ -942,6 +935,20 @@ def run_single_model_experiment(
 
         same_dataset_clean_config = build_scenario_config(
             dataset_spec=dataset_spec,
+            perturbation="original",
+            hparams=transform_hparams,
+        )
+        
+        current_id_dataset_name = dataset_spec.id_dataset_name or id_dataset_name
+        if current_id_dataset_name is None:
+            raise ValueError(
+                f"No ID dataset specified for dataset '{dataset_spec.name}'. "
+                "Set dataset_spec.id_dataset_name or pass id_dataset_name to the function."
+            )
+            
+        id_dataset_spec = get_dataset_spec_by_name(data_config, current_id_dataset_name)
+        id_clean_config = build_scenario_config(
+            dataset_spec=id_dataset_spec,
             perturbation="original",
             hparams=transform_hparams,
         )
@@ -992,7 +999,7 @@ def run_experiments(
     summary_name: str = "experiment_summary.json",
     run_validation: bool = True,
     validation_max_samples: Optional[int] = None,
-    id_dataset_name: str = "imagenet",
+    id_dataset_name: str = None,
 ) -> ExperimentResult:
 
     if perturbations is None:
@@ -1031,7 +1038,7 @@ def run_experiments(
 
     for model_spec in model_specs:
         print(f"\n{'='*20} {model_spec.model_name} / {model_spec.pretrained_weight} {'='*20}")
-
+        
         model_result = run_single_model_experiment(
             model_spec=model_spec,
             transform_hparams=transform_hparams,
