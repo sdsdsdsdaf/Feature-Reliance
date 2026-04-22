@@ -40,6 +40,7 @@ class DatasetSpec:
     num_classes: int = 1000
     sample_indices: List[int] = field(default_factory=list)
     labels_map: List[int] = field(default_factory=list)
+    id_dataset_name: str = None
 
     # Metadata for analysis
     domain_type: str = "id"             # "id", "natural_ood", "synthetic_ood"
@@ -82,7 +83,6 @@ class EvalScenario:
     perturbation: str = "original"
     scenario_name: Optional[str] = None
     normalize: bool = True
-    id_dataset_name: str = None
 
 
 
