@@ -317,7 +317,7 @@ def compute_dataset_metrics(dataset, base_transform=None, transform=None, max_sa
         # 공통 preprocessing
         if base_transform is not None:
             original = base_transform(img.copy())            # HWC
-        transformed = transform(original.copy())             # HWC
+        transformed = transform(img.copy())             # HWC
 
         # metric 계산
         metrics = evaluate_feature_metrics(original, transformed)
