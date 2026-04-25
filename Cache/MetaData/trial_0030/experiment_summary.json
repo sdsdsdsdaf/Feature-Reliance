@@ -10940,64 +10940,64 @@
     }
   },
   "perturbation_validation": {
-    "grayscale": {
-      "perturbation": "grayscale",
-      "config_hash": "d7204f2345dd",
-      "metrics": {
-        "LV_ratio": 0.8104471579459841,
-        "HFE_ratio": 0.7955432171410278,
-        "ESSIM": 0.25743826641092704,
-        "GC": 0.03316482450003809,
-        "texture_score": 0.802995187543506,
-        "shape_score": 0.14530154545548257
-      }
-    },
-    "bilateral": {
-      "perturbation": "bilateral",
-      "config_hash": "2ff4e713a226",
-      "metrics": {
-        "LV_ratio": 0.4519074368000145,
-        "HFE_ratio": 0.3891361240967361,
-        "ESSIM": 0.251413249596256,
-        "GC": 0.05274970132672819,
-        "texture_score": 0.4205217804483753,
-        "shape_score": 0.1520814754614921
-      }
-    },
     "patchshuffle": {
       "perturbation": "patchshuffle",
       "config_hash": "ae1c67141cd8",
       "metrics": {
-        "LV_ratio": 0.9751960420253984,
-        "HFE_ratio": 0.9669348780769331,
-        "ESSIM": 0.15828495484891122,
-        "GC": 0.00281930616642573,
-        "texture_score": 0.9710654600511658,
-        "shape_score": 0.08055213050766848
+        "LV_ratio": 0.9999653188853307,
+        "HFE_ratio": 0.9999914400916132,
+        "ESSIM": 0.22468366712978308,
+        "GC": 0.09510366608704864,
+        "texture_score": 0.9999783794884717,
+        "shape_score": 0.1598936666084159
+      }
+    },
+    "grayscale": {
+      "perturbation": "grayscale",
+      "config_hash": "d7204f2345dd",
+      "metrics": {
+        "LV_ratio": 0.9999988119677459,
+        "HFE_ratio": 0.9999996168092575,
+        "ESSIM": 1.0,
+        "GC": 1.0,
+        "texture_score": 0.9999992143885018,
+        "shape_score": 1.0
       }
     },
     "patchrotation": {
       "perturbation": "patchrotation",
       "config_hash": "d583925edb9f",
       "metrics": {
-        "LV_ratio": 0.8810526862343828,
-        "HFE_ratio": 0.8610344460858003,
-        "ESSIM": 0.21986913263714733,
-        "GC": 0.013557609171704794,
-        "texture_score": 0.8710435661600915,
-        "shape_score": 0.11671337090442603
+        "LV_ratio": 0.9250400195819289,
+        "HFE_ratio": 0.9148538678825484,
+        "ESSIM": 0.36396656633123986,
+        "GC": 0.21059406878429485,
+        "texture_score": 0.9199469437322388,
+        "shape_score": 0.28728031755776734
       }
     },
     "localwarp": {
       "perturbation": "localwarp",
       "config_hash": "5e9f9bdb358d",
       "metrics": {
-        "LV_ratio": 0.9982749293242026,
-        "HFE_ratio": 0.9990648883793507,
-        "ESSIM": 0.026029238976853285,
-        "GC": 0.0004807242366994025,
-        "texture_score": 0.9986699088517765,
-        "shape_score": 0.013254981606776345
+        "LV_ratio": 0.9995035127873765,
+        "HFE_ratio": 0.9996955728156532,
+        "ESSIM": 0.024818890083630977,
+        "GC": 0.00040412817805475455,
+        "texture_score": 0.9995995428015149,
+        "shape_score": 0.012611509130842864
+      }
+    },
+    "bilateral": {
+      "perturbation": "bilateral",
+      "config_hash": "2ff4e713a226",
+      "metrics": {
+        "LV_ratio": 0.5310863013912357,
+        "HFE_ratio": 0.46951693765241886,
+        "ESSIM": 0.5441535852218721,
+        "GC": 0.860907928051737,
+        "texture_score": 0.5003016195218273,
+        "shape_score": 0.7025307566368044
       }
     }
   }

@@ -5,6 +5,16 @@ from Utils.Config import *
 from Utils.Dataset import ImageNetValFlatDataset, build_sample_indices_from_targets
 from Utils.utils import IMAGENET_R_CLASS_IDS, run_experiments, set_seed, get_system_info
 
+from rich.progress import (
+    Progress,
+    BarColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+    MofNCompleteColumn,
+    TransferSpeedColumn,
+)
+
 alpha_grid = [0, 5, 10, 20, 35, 50, 80]
 sigma_grid = [0.5, 1.0, 2.0, 3.5, 6.0]
 
@@ -141,5 +151,6 @@ if __name__ == "__main__":
                 verbose_image=True,
                 run_validation= True,
                 validation_max_samples = 10000, # 최종 실험시에는 None으로
+                max_workers=5,  # CPU 코어 수에 맞게 조절
             )
             print()

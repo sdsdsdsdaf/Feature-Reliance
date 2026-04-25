@@ -1,5 +1,6 @@
 import hashlib
 import json
+import time
 from typing import List, Tuple, Union, Optional
 
 import cv2
@@ -18,6 +19,21 @@ from torch.utils.data import DataLoader
 from pprint import pprint
 from torchvision.datasets import ImageFolder
 from timm.data.imagenet_info import ImageNetInfo
+
+from concurrent.futures import ProcessPoolExecutor, as_completed 
+import os
+import queue
+
+from multiprocessing import Manager, Pool, Queue
+from rich.progress import (
+    Progress,
+    BarColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+    MofNCompleteColumn,
+    TransferSpeedColumn,
+)
 
 
 try:
@@ -1000,6 +1016,7 @@ def run_experiments(
     run_validation: bool = True,
     validation_max_samples: Optional[int] = None,
     id_dataset_name: str = None,
+    max_workers: int = 1,
 ) -> ExperimentResult:
 
     if perturbations is None:
@@ -1034,6 +1051,7 @@ def run_experiments(
             transform_hparams=transform_hparams,
             perturbations=perturbations,
             max_samples=validation_max_samples,
+            max_workers=max_workers,
         )
 
     for model_spec in model_specs:
@@ -1095,21 +1113,93 @@ def run_experiments(
 
     return output
 
-def run_perturbation_validation(
-    transform_hparams: TransformHyperParams,
-    perturbations: List[str],
-    max_samples: Optional[int] = None,
-    verbose_image: bool = False,
-) -> PerturbationValidationResult:
-    
+def run_one_perturbation_validation(args):  # CHANGED
+    perturbation, transform_hparams, max_samples, progress_queue = args
+
     base_ds = ImageNetValFlatDataset()
+
     base_transform = get_transform(
         test_augmentations=transform_hparams.prefix,
         resize_size=transform_hparams.resize_size,
         split="test",
         normalize=False,
     )
-    
+
+    pert_transform = build_transform(
+        perturbation=perturbation,
+        mean=[0.0, 0.0, 0.0],
+        std=[1.0, 1.0, 1.0],
+        hparams=transform_hparams,
+        normalize=False,
+    )
+
+    metrics = compute_dataset_metrics(
+        dataset=base_ds,
+        base_transform=base_transform,
+        transform=pert_transform,
+        max_samples=max_samples,
+        desc=perturbation,
+        progress_queue=progress_queue,
+        progress_every=10,
+    )
+
+    return perturbation, metrics
+
+def pretty_print_validation(results: dict, transform_name_feature_supp_map: dict):  # CHANGED
+    print("\n" + "=" * 73)
+    print(" Perturbation Validation Summary ".center(73))
+    print("=" * 73)
+
+    header = (
+        f"{'Perturb':<14} | {'Feature':<8} | "
+        f"{'LV':>6} {'HFE':>6} {'ESSIM':>6} {'GC':>6} | "
+        f"{'Texture':>7} {'Shape':>7}"
+    )
+    print(header)
+    print("-" * 73)
+
+    for name, record in results.items():
+        m = record.metrics
+        feature = transform_name_feature_supp_map.get(name, "N/A")
+
+        print(
+            f"{name:<14} | {feature:<8} | "
+            f"{m['LV_ratio']:6.3f} {m['HFE_ratio']:6.3f} {m['ESSIM']:6.3f} {m['GC']:6.3f} | "
+            f"{m['texture_score']:7.3f} {m['shape_score']:7.3f}"
+        )
+
+    print("=" * 73 + "\n")
+
+def drain_progress_queue(progress_queue, progress, task_ids):
+    drained = 0
+
+    while True:
+        try:
+            perturbation, advance = progress_queue.get(timeout=0.001)
+        except queue.Empty:
+            break
+
+        if perturbation in task_ids:
+            progress.update(
+                task_ids[perturbation],
+                advance=advance,
+                refresh=True,
+            )
+            drained += 1
+        else:
+            print(f"[WARN] Unknown perturbation: {perturbation}")
+
+    return drained
+
+
+def run_perturbation_validation(
+    transform_hparams: TransformHyperParams,
+    perturbations: List[str],
+    max_samples: Optional[int] = None,
+    verbose_image: bool = False,
+    max_workers: int = 4,
+) -> PerturbationValidationResult:
+
     transform_name_feature_supp_map = {
         "original": None,
         "grayscale": "color",
@@ -1129,66 +1219,94 @@ def run_perturbation_validation(
             hparams=transform_hparams,
         )
 
-    for perturbation in perturbations:
-        if perturbation == "original":
-            continue
-        if perturbation not in list(transform_name_feature_supp_map.keys()):
-             raise ValueError(
-                f"Unknown perturbation: '{perturbation}'. "
+    valid_perturbations = [p for p in perturbations if p != "original"]
+
+    for p in valid_perturbations:
+        if p not in transform_name_feature_supp_map:
+            raise ValueError(
+                f"Unknown perturbation: '{p}'. "
                 f"Available: {list(transform_name_feature_supp_map.keys())}"
             )
-        
-        desc = f"Measuring [{perturbation}/{transform_name_feature_supp_map[perturbation]}]" 
-        perturbation_config = build_perturbation_config(perturbation, transform_hparams)
-        config_hash = make_config_hash(perturbation_config)
 
-        pert_transform = build_transform(
-            perturbation=perturbation,
-            mean=[0.0, 0.0, 0.0],
-            std=[1.0, 1.0, 1.0],
-            hparams=transform_hparams,
-            normalize=False,
-        )
+    base_ds = ImageNetValFlatDataset()
+    total_samples = min(
+        len(base_ds),
+        int(max_samples) if max_samples is not None else len(base_ds),
+    )
+    del base_ds
 
-        metrics = compute_dataset_metrics(
-            dataset=base_ds,
-            base_transform=base_transform,
-            transform=pert_transform,
-            max_samples=max_samples,
-            desc=desc
-        )
+    max_workers = min(
+        max_workers,
+        len(valid_perturbations),
+        os.cpu_count() or 1,
+    )
 
-        result.results[perturbation] = PerturbationMetricResult(
-            perturbation=perturbation,
-            config_hash=config_hash,
-            metrics=metrics,
-        )
-        
-        def pretty_print_validation(results: dict):
-            print("\n" + "="*73)
-            print(" Perturbation Validation Summary ".center(73))
-            print("="*73)
+    with Manager() as manager:
+        progress_queue = manager.Queue()
 
-            header = (
-                f"{'Perturb':<14} | {'Feature':<8} | "
-                f"{'LV':>6} {'HFE':>6} {'ESSIM':>6} {'GC':>6} | "
-                f"{'Texture':>7} {'Shape':>7}"
-            )
-            print(header)
-            print("-"*73)
+        args_list = [
+            (p, transform_hparams, total_samples, progress_queue)
+            for p in valid_perturbations
+        ]
 
-            for name, record in results.items():
-                m = record.metrics
+        task_ids = {}
 
-                feature = transform_name_feature_supp_map.get(name, "N/A")
+        with Progress(
+            TextColumn("[bold cyan]{task.description:<14}"),
+            BarColumn(
+                complete_style="green",
+                finished_style="bold green",
+            ),
+            MofNCompleteColumn(),
+            TransferSpeedColumn(),
+            TimeElapsedColumn(),
+            TimeRemainingColumn(),
+        ) as progress:
 
-                print(
-                    f"{name:<14} | {feature:<8} | "
-                    f"{m['LV_ratio']:6.3f} {m['HFE_ratio']:6.3f} {m['ESSIM']:6.3f} {m['GC']:6.3f} | "
-                    f"{m['texture_score']:7.3f} {m['shape_score']:7.3f}"
+            for p in valid_perturbations:
+                task_ids[p] = progress.add_task(
+                    description=p,
+                    total=total_samples,
                 )
 
-            print("="*73 + "\n")
-    
-    pretty_print_validation(result.results)
+            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                futures = [
+                    executor.submit(run_one_perturbation_validation, args)
+                    for args in args_list
+                ]
+
+                remaining = len(futures)
+                collected = set()
+
+                while remaining > 0:
+                    
+                    drain_progress_queue(progress_queue, progress, task_ids)
+                    
+                    for idx, future in enumerate(futures):
+                        if idx in collected:
+                            continue
+
+                        if future.done():
+                            perturbation, metrics = future.result()
+
+                            perturbation_config = build_perturbation_config(
+                                perturbation,
+                                transform_hparams,
+                            )
+                            config_hash = make_config_hash(perturbation_config)
+
+                            result.results[perturbation] = PerturbationMetricResult(
+                                perturbation=perturbation,
+                                config_hash=config_hash,
+                                metrics=metrics,
+                            )
+
+                            collected.add(idx)
+                            remaining -= 1
+
+                    time.sleep(0.05)
+
+                drain_progress_queue(progress_queue, progress, task_ids)
+
+    pretty_print_validation(result.results, transform_name_feature_supp_map)
     return result

@@ -10,6 +10,17 @@ import numpy as np
 from skimage.metrics import structural_similarity as ssim
 from tqdm import tqdm
 
+from multiprocessing import Queue
+from rich.progress import (
+    Progress,
+    BarColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+    MofNCompleteColumn,
+    TransferSpeedColumn,
+)
+
 # TODO Simtorch로 계산 결과 동일하게 나오는지 검증
 
 def linear_cka(X:Tensor, Y:Tensor, eps=1e-12, return_float:bool=False) -> Tensor:
@@ -298,8 +309,16 @@ def evaluate_feature_metrics(
         "texture_score": texture_score,
         "shape_score": shape_score,
     }
-    
-def compute_dataset_metrics(dataset, base_transform=None, transform=None, max_samples=None, desc=None):
+
+def compute_dataset_metrics(
+    dataset,
+    base_transform=None,
+    transform=None,
+    max_samples=None,
+    desc=None,
+    progress_queue:Queue=None,
+    progress_every=10,
+):
     results = {
         "LV_ratio": [],
         "HFE_ratio": [],
@@ -308,27 +327,40 @@ def compute_dataset_metrics(dataset, base_transform=None, transform=None, max_sa
         "texture_score": [],
         "shape_score": [],
     }
-    if max_samples is None:
-        max_samples = 1e9
-    
-    for i in tqdm(range(min(len(dataset), max_samples)), desc=desc):
-        img, _ = dataset[i]
-        original = img.copy()
-        # 공통 preprocessing
-        if base_transform is not None:
-            original = base_transform(img.copy())            # HWC
-        transformed = transform(img.copy())             # HWC
 
-        # metric 계산
+    if max_samples is None:
+        max_samples = int(1e9)
+
+    n = min(len(dataset), int(max_samples))
+
+    for i in range(n):
+        img, _ = dataset[i]
+
+        if base_transform is not None:
+            original = base_transform(img.copy())
+        else:
+            original = img.copy()
+
+        # Important: start from raw img, not original
+        if transform is not None:
+            transformed = transform(img.copy())
+        else:
+            transformed = img.copy()
+
         metrics = evaluate_feature_metrics(original, transformed)
 
         for k in results:
             results[k].append(metrics[k])
 
-    # 평균
-    summary = {k: float(np.mean(v)) for k, v in results.items()}
+        if progress_queue is not None and (i + 1) % progress_every == 0:
+            progress_queue.put((desc, progress_every))
 
-    return summary
+    if progress_queue is not None:
+        remainder = n % progress_every
+        if remainder != 0:
+            progress_queue.put((desc, remainder))
+
+    return {k: float(np.mean(v)) for k, v in results.items()}
 
 if __name__ == "__main__":
 
