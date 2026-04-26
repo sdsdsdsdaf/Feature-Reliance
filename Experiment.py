@@ -15,8 +15,11 @@ from rich.progress import (
     TransferSpeedColumn,
 )
 
-alpha_grid = [0, 5, 10, 20, 35, 50, 80]
+alpha_grid = [0, 5, 10, 20, 35, 50, 80] # LocalWarp의 alpha 값 후보군
 sigma_grid = [0.5, 1.0, 2.0, 3.5, 6.0]
+
+sigma_color_grid = [10, 30, 60, 100, 150, 170] # Bilateral Filter의 sigma_color 값 후보군
+sigma_space_grid = [3, 5, 10, 20, 40, 75]
 
 
 if __name__ == "__main__":
@@ -34,11 +37,11 @@ if __name__ == "__main__":
     vit = timm.create_model("vit_base_patch16_224.augreg_in1k", pretrained=True)
     i = 0
     print()
-    for alpha in alpha_grid:
-        for sigma in sigma_grid:
+    for sigma_color in sigma_color_grid:
+        for sigma_space in sigma_space_grid:
             i += 1
-            total_i = len(sigma_grid) * len(alpha_grid)
-            print(f"[{i}/{total_i}] alpha: {alpha}, sigma: {sigma}")
+            total_i = len(sigma_color_grid) * len(sigma_space_grid)
+            print(f"[{i}/{total_i}] sigma_color: {sigma_color}, sigma_space: {sigma_space}")
     
             model_specs = [
                 ModelSpec(
@@ -62,14 +65,14 @@ if __name__ == "__main__":
                 p=1.0,
                 prefix="resizecrop",
                 bilateral_d=11,
-                sigma_color=170,
-                sigma_space=75,
+                sigma_color=sigma_color,
+                sigma_space=sigma_space,
                 gaussian_k=11,
                 gaussian_sigma=2.0,
                 gray_alpha=1.0,
                 grid_size=6,
-                alpha_localwarp=alpha,
-                sigma_localwarp=sigma,
+                alpha_localwarp=35,
+                sigma_localwarp=3.5,
             )
 
             data_config = DataConfig(
