@@ -6,9 +6,9 @@ import torch.nn as nn
 
 @dataclass
 class TransformHyperParams:
-    resize_size: int = 224
     p: float = 1.0
     prefix: str = "resizecrop"
+    resize_size: int = 256
 
     # Texture
     bilateral_d: int = 11
@@ -75,6 +75,7 @@ class ModelSpec:
     model: nn.Module
     mean: List[float]
     std: List[float]
+    resize_size: int
 
 
 @dataclass

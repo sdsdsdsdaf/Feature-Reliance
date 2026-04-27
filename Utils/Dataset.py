@@ -213,11 +213,49 @@ class ImageFolderDS(Dataset):
             arr = self.transform(arr)
             
         return arr, label
-    
+
+
+class HFImageNetTrainSubsetDataset(Dataset):
+    def __init__(self, hf_dataset, class_ids, clean_transform=None, perturb_transform=None):
+        self.ds = hf_dataset
+        self.class_ids = set(int(x) for x in class_ids)
+        self.clean_transform = clean_transform
+        self.perturb_transform = perturb_transform
+
+        labels = self.ds["label"]
+        self.indices = [
+            i for i, y in enumerate(labels)
+            if int(y) in self.class_ids
+        ]
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        item = self.ds[self.indices[idx]]
+
+        image = item["image"].convert("RGB")
+        image = np.array(image)
+        label = int(item["label"])  # keep 0~999 label
+
+        if self.perturb_transform is None:
+            if self.clean_transform is not None:
+                image = self.clean_transform(image)
+            return image, label
+
+        clean = self.clean_transform(image)
+        perturbed = self.perturb_transform(image)
+
+        return {
+            "clean": clean,
+            "perturbed": perturbed,
+            "label": label,
+        }
     
 if __name__ == "__main__":
     from timm.data import resolve_model_data_config, create_transform
     
+    """
     def debug_label_mapping(devkit_dir: str, label_mapping: dict):
         devkit_dir = Path(devkit_dir)
 
@@ -276,3 +314,121 @@ if __name__ == "__main__":
     print(resnet_transform)
     print("="*15  + "="*15 + "="*26)
     print()
+    """
+    
+    from datasets import load_from_disk
+    from utils import CLASS_MAPPING_REGISTRY, build_transform
+    from Config import ModelSpec, DataConfig, TransformHyperParams
+    
+    imagenet_r_class_ids = CLASS_MAPPING_REGISTRY["imagenet_r_subset_map"]["subset_class_ids"]
+    
+    ds = load_from_disk("Data/ILSVRC2012/train")
+    
+    print(type(ds))
+    print(ds.column_names)
+    
+    model_spec = ModelSpec(
+        model_name="resnet50",
+        pretrained_weight="in1k",
+        model=None,
+        mean=[0.485, 0.456, 0.406],
+        std=[0.229, 0.224, 0.225],
+        resize_size=235, # ResNet50의 경우 256으로 resize 후 center crop 224 진행 (timm의 기본 전처리 방식)
+    )
+    
+    clean_transform = build_transform(
+        perturbation="original",
+        mean=model_spec.mean,
+        std=model_spec.std,
+        resize_size=model_spec.resize_size,
+        hparams=TransformHyperParams(
+            resize_size=256,
+            p=1.0,
+            prefix="resizecrop",
+            bilateral_d=11,
+            sigma_color=170,
+            sigma_space=75,
+            gaussian_k=11,
+            gaussian_sigma=2.0,
+            gray_alpha=1.0,
+         ),
+        normalize=True,
+    )
+    
+    perturb_transform = build_transform(
+        perturbation="localwarp",
+        mean=model_spec.mean,
+        std=model_spec.std,
+        resize_size=model_spec.resize_size,
+        hparams=TransformHyperParams(
+        resize_size=256,
+        p=1.0,
+        prefix="resizecrop",
+        bilateral_d=11,
+        sigma_color=170,
+        sigma_space=75,
+        gaussian_k=11,
+        gaussian_sigma=2.0,
+        gray_alpha=1.0,
+        ),
+        normalize=True,
+    )
+    
+    train_subset = HFImageNetTrainSubsetDataset(
+        hf_dataset=ds,
+        class_ids=imagenet_r_class_ids,   # 0~999 ImageNet-R aligned class ids
+        clean_transform=clean_transform,
+        perturb_transform=perturb_transform,
+    )
+    
+    from tqdm.auto import tqdm
+    import torch
+    
+    def sanity_check_intervention_dataset(train_subset, n=5):
+        print("dataset length:", len(train_subset))
+
+        labels = []
+
+        for i in range(n):
+            item = train_subset[i]
+
+            clean = item["clean"]
+            pert = item["perturbed"]
+            label = item["label"]
+
+            labels.append(int(label))
+
+            print(f"\n[{i}]")
+            print("label:", label)
+            print("clean type/shape:", type(clean), clean.shape, clean.dtype)
+            print("pert  type/shape:", type(pert), pert.shape, pert.dtype)
+
+            if torch.is_tensor(clean):
+                print("clean min/max/mean:", clean.min().item(), clean.max().item(), clean.mean().item())
+                print("pert  min/max/mean:", pert.min().item(), pert.max().item(), pert.mean().item())
+            print("abs diff mean:", (clean - pert).abs().mean().item())
+
+        print("\nunique labels in sampled items:", sorted(set(labels)))
+        
+        
+
+    sanity_check_intervention_dataset(train_subset, n=10)
+    from torch.utils.data import DataLoader
+
+    loader = DataLoader(train_subset, batch_size=512, shuffle=False)
+
+    labels = np.array(train_subset.ds["label"])
+    subset_indices = np.array(train_subset.indices)
+
+    subset_labels = labels[subset_indices]
+
+    unique_labels = set(subset_labels.tolist())
+
+    print("num unique:", len(unique_labels))
+
+    expected = set(CLASS_MAPPING_REGISTRY["imagenet_r_subset_map"]["subset_class_ids"])
+    actual = unique_labels
+
+    print("match:", actual == expected)
+    print("missing:", expected - actual)
+    print("extra:", actual - expected)
