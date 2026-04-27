@@ -52,6 +52,7 @@ if __name__ == "__main__":
                     model=resnet,
                     mean=[0.485, 0.456, 0.406],
                     std=[0.229, 0.224, 0.225],
+                    resize_size=235, # ResNet50의 경우 256으로 resize 후 center crop 224 진행 (timm의 기본 전처리 방식)
                 ),
                 ModelSpec(
                     model_name="vit-b",
@@ -59,6 +60,7 @@ if __name__ == "__main__":
                     model=vit,
                     mean=[0.5, 0.5, 0.5],
                     std=[0.5, 0.5, 0.5],
+                    resize_size=248, # ViT-B/16의 경우 224보다 약간 큰 248로 resize 후 center crop 224 진행 (timm의 기본 전처리 방식)
                 ),
             ]
 

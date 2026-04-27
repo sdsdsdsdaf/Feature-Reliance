@@ -481,15 +481,16 @@ def build_transform(
     mean: List[float],
     std: List[float],
     hparams: TransformHyperParams,
+    resize_size: int,
     normalize: bool = True,
 ):
     prefix = hparams.prefix
-
+    
     if perturbation == "original":
         if normalize:
             return get_transform(
                 test_augmentations=prefix,
-                resize_size=hparams.resize_size,
+                resize_size=resize_size,
                 mean=mean,
                 std=std,
                 split="test",
@@ -498,14 +499,14 @@ def build_transform(
         else:
             return get_transform(
                 train_augmentations=prefix,
-                resize_size=hparams.resize_size,
+                resize_size=resize_size,
                 split="train",
                 normalize=False,
             )
 
     common_kwargs = dict(
         p=hparams.p,
-        resize_size=hparams.resize_size,
+        resize_size=resize_size,
         split="train",
         normalize=normalize,
     )
@@ -593,6 +594,7 @@ def build_default_scenarios(
 def build_transform_dict(
     mean: List[float],
     std: List[float],
+    resize_size: int,
     hparams: TransformHyperParams,
     perturbations: List[str],
     normalize: bool = True,
@@ -602,6 +604,7 @@ def build_transform_dict(
             perturbation=p,
             mean=mean,
             std=std,
+            resize_size=resize_size,
             hparams=hparams,
             normalize=normalize,
         )
@@ -631,6 +634,7 @@ def visualize_perturbations(
     vis_transforms = build_transform_dict(
         mean=[0.0, 0.0, 0.0],
         std=[1.0, 1.0, 1.0],
+        reszize_size=256,
         hparams=hparams,
         perturbations=perturbations,
         normalize=False,
@@ -904,6 +908,7 @@ def run_single_model_experiment(
             perturbation=scenario.perturbation,
             mean=model_spec.mean,
             std=model_spec.std,
+            resize_size=model_spec.resize_size,
             hparams=transform_hparams,
             normalize=scenario.normalize,
         )
@@ -1129,6 +1134,7 @@ def run_one_perturbation_validation(args):  # CHANGED
         perturbation=perturbation,
         mean=[0.0, 0.0, 0.0],
         std=[1.0, 1.0, 1.0],
+        resize_size=256,
         hparams=transform_hparams,
         normalize=False,
     )

@@ -16,6 +16,7 @@ import numpy as np
 import albumentations as A
 
 from torchvision import transforms
+from PIL import Image
 
 class CenterCrop(object):
     """Constant Transformation. PyTorch Wrapper for Albumentation VerticalFlip."""
@@ -52,12 +53,19 @@ class RandomResizedCrop:
 
 
 class Resize:
-    """Range Transformation. PyTorch Wrapper for Albumentation Flip."""
-    def __init__(self, size: Tuple[int, int]):
-        self.Resize = A.Resize(size[0], size[1])
+    def __init__(self, size:tuple[int, int], interpolation=transforms.InterpolationMode.BICUBIC):
+        self.resize = transforms.Resize(
+            size[0],
+            interpolation=interpolation,
+            antialias=True,
+        )
 
-    def __call__(self, image: np.array) -> np.array:
-        return self.Resize(image=image)['image']
+    def __call__(self, img):
+        # img: PIL
+        if isinstance(img, np.ndarray):
+            img = Image.fromarray(img)
+        img = self.resize(img)
+        return np.array(img)
 
 
 class ContinousGrayScale:
