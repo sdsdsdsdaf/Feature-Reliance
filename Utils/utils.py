@@ -19,6 +19,7 @@ from torch.utils.data import DataLoader
 from pprint import pprint
 from torchvision.datasets import ImageFolder
 from timm.data.imagenet_info import ImageNetInfo
+from datasets import load_from_disk
 
 from concurrent.futures import ProcessPoolExecutor, as_completed 
 import os
@@ -52,7 +53,7 @@ try:
         ScenarioRecord
     )
     from Utils.transfrom import get_transform
-    from Utils.Dataset import ImageNetValFlatDataset, ImageFolderDS, ImageNetValSubsetDataset
+    from Utils.Dataset import ImageNetValFlatDataset, ImageFolderDS, ImageNetValSubsetDataset, HFImageNetTrainSubsetDataset
     from Utils.metric import relative_accuracy
     from Utils.metric import compute_dataset_metrics
     from Utils.metric import linear_cka, js_divergence
@@ -72,7 +73,7 @@ except:
         ScenarioRecord
     )
     from transfrom import get_transform
-    from Dataset import ImageNetValFlatDataset, ImageFolderDS,  ImageNetValSubsetDataset
+    from Dataset import ImageNetValFlatDataset, ImageFolderDS,  ImageNetValSubsetDataset, HFImageNetTrainSubsetDataset
     from metric import relative_accuracy
     from metric import compute_dataset_metrics
     from metric import linear_cka, js_divergence
@@ -414,7 +415,75 @@ def build_perturbation_config(
 
     return config
 
-def build_dataset(dataset_spec: DatasetSpec, transform):
+def build_dataset(
+    dataset_spec: DatasetSpec,
+    transform=None,
+    clean_transform=None,
+    perturb_transform=None,
+):
+    """
+    Build dataset from DatasetSpec.
+
+    Modes:
+        1. Standard dataset:
+            build_dataset(dataset_spec, transform=transform)
+            -> returns (image, label)
+
+        2. Paired intervention dataset:
+            build_dataset(
+                dataset_spec,
+                clean_transform=clean_transform,
+                perturb_transform=perturb_transform,
+            )
+            -> returns {
+                "clean": clean,
+                "perturbed": perturbed,
+                "label": label,
+            }
+    """
+
+    # -------------------------------------------------
+    # HF ImageNet subset for intervention training
+    # -------------------------------------------------
+    if dataset_spec.dataset_type in [
+        "hf_imagenet_subset",
+        "hf_imagenet_train_subset",
+        "hf_imagenet_val_subset",
+    ]:
+        if dataset_spec.root is None:
+            raise ValueError(
+                "dataset_spec.root must be provided for HF ImageNet subset."
+            )
+
+        if dataset_spec.labels_map is None or len(dataset_spec.labels_map) == 0:
+            raise ValueError(
+                "dataset_spec.labels_map must contain class ids for HFImageNetTrainSubsetDataset."
+            )
+
+        hf_dataset = load_from_disk(dataset_spec.root)
+
+        # If clean_transform / perturb_transform are provided,
+        # HFImageNetTrainSubsetDataset returns paired dict.
+        if clean_transform is not None or perturb_transform is not None:
+            return HFImageNetTrainSubsetDataset(
+                hf_dataset=hf_dataset,
+                class_ids=dataset_spec.labels_map,
+                clean_transform=clean_transform,
+                perturb_transform=perturb_transform,
+            )
+
+        # Fallback: standard single-transform mode.
+        return HFImageNetTrainSubsetDataset(
+            hf_dataset=hf_dataset,
+            class_ids=dataset_spec.labels_map,
+            clean_transform=transform,
+            perturb_transform=None,
+        )
+
+
+    # -------------------------------------------------
+    # Original ImageNet val flat
+    # -------------------------------------------------
     if dataset_spec.dataset_type == "imagenet_val_flat":
         return (
             ImageNetValFlatDataset(dataset_spec.root, transform=transform)
@@ -422,26 +491,37 @@ def build_dataset(dataset_spec: DatasetSpec, transform):
             else ImageNetValFlatDataset(transform=transform)
         )
 
-    # TODO: implement actual dataset classes
+    # -------------------------------------------------
+    # ImageNet-R
+    # -------------------------------------------------
     elif dataset_spec.dataset_type == "imagenet_r":
         return ImageFolderDS(dataset_spec.root, transform=transform)
-    
+
+    # -------------------------------------------------
+    # ImageNet val subset
+    # -------------------------------------------------
     elif dataset_spec.dataset_type == "imagenet_val_subset":
         if dataset_spec.sample_indices is None:
-            raise ValueError("sample_indices must be provided for imagenet_val_subset")
+            raise ValueError(
+                "sample_indices must be provided for imagenet_val_subset"
+            )
 
         return ImageNetValSubsetDataset(
             indices=dataset_spec.sample_indices,
             root=dataset_spec.root,
             transform=transform,
-            class_ids=dataset_spec.labels_map
+            class_ids=dataset_spec.labels_map,
+            perturbation_transform=perturb_transform,
+            return_pair=(perturb_transform is not None),
         )
 
     elif dataset_spec.dataset_type == "stylized_imagenet":
-        raise NotImplementedError("ImageNet-C Not Implemeted   ")
+        raise NotImplementedError("ImageNet-C Not Implemented")
 
     else:
-        raise ValueError(f"Unsupported dataset_type: {dataset_spec.dataset_type}")
+        raise ValueError(
+            f"Unsupported dataset_type: {dataset_spec.dataset_type}"
+        )
 
 
 def make_save_dir(
@@ -634,7 +714,7 @@ def visualize_perturbations(
     vis_transforms = build_transform_dict(
         mean=[0.0, 0.0, 0.0],
         std=[1.0, 1.0, 1.0],
-        reszize_size=256,
+        resize_size=256,
         hparams=hparams,
         perturbations=perturbations,
         normalize=False,
