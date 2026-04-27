@@ -21,6 +21,8 @@ sigma_grid = [0.5, 1.0, 2.0, 3.5, 6.0]
 sigma_color_grid = [10, 30, 60, 100, 150, 170] # Bilateral Filter의 sigma_color 값 후보군
 sigma_space_grid = [3, 5, 10, 20, 40, 75]
 
+grid_size_grid = [3, 4, 5, 6, 7, 8, 9, 10, 11, 15] # PatchShuffle의 grid_size 값 후보군
+temp = [1]
 
 if __name__ == "__main__":
     set_seed(42)
@@ -37,11 +39,11 @@ if __name__ == "__main__":
     vit = timm.create_model("vit_base_patch16_224.augreg_in1k", pretrained=True)
     i = 0
     print()
-    for sigma_color in sigma_color_grid:
-        for sigma_space in sigma_space_grid:
+    for _ in temp:
+        for grid_size in sigma_space_grid:
             i += 1
-            total_i = len(sigma_color_grid) * len(sigma_space_grid)
-            print(f"[{i}/{total_i}] sigma_color: {sigma_color}, sigma_space: {sigma_space}")
+            total_i = len(temp) * len(grid_size_grid)
+            print(f"[{i}/{total_i}] Running experiment with grid_size={grid_size}...")
     
             model_specs = [
                 ModelSpec(
@@ -65,12 +67,12 @@ if __name__ == "__main__":
                 p=1.0,
                 prefix="resizecrop",
                 bilateral_d=11,
-                sigma_color=sigma_color,
-                sigma_space=sigma_space,
+                sigma_color=170,
+                sigma_space=75,
                 gaussian_k=11,
                 gaussian_sigma=2.0,
                 gray_alpha=1.0,
-                grid_size=6,
+                grid_size=grid_size,
                 alpha_localwarp=35,
                 sigma_localwarp=3.5,
             )
