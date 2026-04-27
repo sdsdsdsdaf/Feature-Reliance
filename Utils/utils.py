@@ -441,7 +441,8 @@ def build_dataset(
                 "label": label,
             }
     """
-
+    if clean_transform is not None:
+        transform = clean_transform
     # -------------------------------------------------
     # HF ImageNet subset for intervention training
     # -------------------------------------------------
@@ -451,33 +452,18 @@ def build_dataset(
         "hf_imagenet_val_subset",
     ]:
         if dataset_spec.root is None:
-            raise ValueError(
-                "dataset_spec.root must be provided for HF ImageNet subset."
-            )
+            raise ValueError("dataset_spec.root must be provided for HF ImageNet subset.")
 
         if dataset_spec.labels_map is None or len(dataset_spec.labels_map) == 0:
-            raise ValueError(
-                "dataset_spec.labels_map must contain class ids for HFImageNetTrainSubsetDataset."
-            )
+            raise ValueError("dataset_spec.labels_map must contain class ids.")
 
         hf_dataset = load_from_disk(dataset_spec.root)
 
-        # If clean_transform / perturb_transform are provided,
-        # HFImageNetTrainSubsetDataset returns paired dict.
-        if clean_transform is not None or perturb_transform is not None:
-            return HFImageNetTrainSubsetDataset(
-                hf_dataset=hf_dataset,
-                class_ids=dataset_spec.labels_map,
-                clean_transform=clean_transform,
-                perturb_transform=perturb_transform,
-            )
-
-        # Fallback: standard single-transform mode.
         return HFImageNetTrainSubsetDataset(
             hf_dataset=hf_dataset,
             class_ids=dataset_spec.labels_map,
             clean_transform=transform,
-            perturb_transform=None,
+            perturb_transform=perturb_transform,
         )
 
 
@@ -485,11 +471,13 @@ def build_dataset(
     # Original ImageNet val flat
     # -------------------------------------------------
     if dataset_spec.dataset_type == "imagenet_val_flat":
-        return (
-            ImageNetValFlatDataset(dataset_spec.root, transform=transform)
-            if dataset_spec.root is not None
-            else ImageNetValFlatDataset(transform=transform)
+        return ImageNetValFlatDataset(
+            root=dataset_spec.root,
+            transform=transform,
+            perturbation_transform=perturb_transform,
+            return_pair=(perturb_transform is not None),
         )
+
 
     # -------------------------------------------------
     # ImageNet-R
