@@ -1068,12 +1068,55 @@ def run_single_model_experiment(
 # Multi Model Runner
 # =========================================================
 
-def get_next_trial_id(root):
-    existing = sorted([p.name for p in root.glob("trial_*")])
-    if not existing:
+def is_completed_trial(trial_dir: Path, summary_name: str = "experiment_summary.json") -> bool:
+    summary_path = trial_dir / summary_name
+
+    if not summary_path.exists():
+        return False
+
+    try:
+        with open(summary_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        required_keys = [
+            "transform_hparams",
+            "data_config",
+            "extraction_config",
+            "scenarios",
+            "model_results",
+        ]
+
+        return all(k in data for k in required_keys)
+
+    except Exception:
+        return False
+
+
+def get_next_trial_id(
+    root,
+    summary_name: str = "experiment_summary.json",
+) -> int:
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+
+    trial_dirs = sorted(
+        [
+            p for p in root.glob("trial_*")
+            if p.is_dir() and p.name.split("_")[-1].isdigit()
+        ],
+        key=lambda p: int(p.name.split("_")[-1]),
+    )
+
+    for trial_dir in trial_dirs:
+        trial_id = int(trial_dir.name.split("_")[-1])
+
+        if not is_completed_trial(trial_dir, summary_name=summary_name):
+            return trial_id
+
+    if not trial_dirs:
         return 0
-    last = max(int(name.split("_")[1]) for name in existing)
-    return last + 1
+
+    return int(trial_dirs[-1].name.split("_")[-1]) + 1
 
 def run_experiments(
     model_specs: List[ModelSpec],
