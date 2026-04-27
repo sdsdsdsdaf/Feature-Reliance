@@ -102,10 +102,17 @@ class ImageNetValFlatDataset(Dataset):
         self,
         root: str = "Data",
         transform: Callable = None,
+        perturbation_transform = None,
+        return_pair=False
     ) -> None:
         
         self.root = Path(root)
         self.transform = transform
+        self.perturbation_transform = perturbation_transform
+        self.return_pair = return_pair
+        
+        if self.return_pair and self.perturbation_transform is None:
+            raise ValueError("perturbation_transform must be provided when return_pair=True")
 
         self.image_dir = self.root / "ILSVRC2012_img_val"
         self.gt_file = (
@@ -148,10 +155,19 @@ class ImageNetValFlatDataset(Dataset):
 
         image = Image.open(image_path).convert("RGB")
         image = np.array(image)
-        if self.transform is not None:
-            image = self.transform(image)
 
-        return image, target
+        clean_image = self.transform(image) if self.transform is not None else image
+
+        if self.return_pair:
+            perturbed_image = self.perturbation_transform(image)
+
+            return {
+                "clean": clean_image,
+                "perturbed": perturbed_image,
+                "label": target,
+            }
+
+        return clean_image, target
 
     def index_to_description(self, index: int) -> str:
         return self.index_to_description_map[index]
@@ -163,22 +179,43 @@ class ImageNetValSubsetDataset(Dataset):
         class_ids: Sequence[int],
         root: Optional[str] = None,
         transform=None,
+        perturbation_transform=False,
+        return_pair=False
     ):
+        
+        self.return_pair=return_pair
+        self.perturbation_transform=perturbation_transform
+        
         self.base_ds = (
-            ImageNetValFlatDataset(root=root, transform=transform)
+            ImageNetValFlatDataset(
+                root=root,
+                transform=transform,
+                perturbation_transform=perturbation_transform,
+                return_pair=return_pair,
+            )
             if root is not None
-            else ImageNetValFlatDataset(transform=transform)
+            else ImageNetValFlatDataset(
+                transform=transform,
+                perturbation_transform=perturbation_transform,
+                return_pair=return_pair,
+            )
         )
         self.indices = list(indices)
         self.class_ids = list(class_ids)
         self.class_id_to_subset_idx = {
             class_id: i for i, class_id in enumerate(self.class_ids)
         }
+        
 
     def __len__(self):
         return len(self.indices)
 
     def __getitem__(self, idx):
+        if self.return_pair and  self.perturbation_transform is not None:
+            result = self.base_ds[self.indices[idx]]
+            # result['label'] = self.class_id_to_subset_idx[label]
+            return result
+        
         image, label = self.base_ds[self.indices[idx]]
         label = self.class_id_to_subset_idx[label]
         return image, label

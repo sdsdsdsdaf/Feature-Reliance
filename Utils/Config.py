@@ -1,9 +1,9 @@
 from dataclasses import dataclass, field, asdict, is_dataclass
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Literal
 from torch import Tensor
 import torch.nn as nn
-
-
+  
+    
 @dataclass
 class TransformHyperParams:
     p: float = 1.0
@@ -234,3 +234,63 @@ class ExperimentResult:
             
 
 
+# ------ Train Config ------
+@dataclass
+class LossConfig:
+    mode: Literal["kl", "feature", "both", "none"] = "feature"
+    lambda_kl: float = 0.1
+    lambda_feat: float = 0.1
+    temperature: float = 2.0
+    detach_teacher: bool = True
+    normalize_feature: bool = True
+    ce_clean_weight: float = 1.0
+    ce_pert_weight: float = 1.0
+    
+@dataclass
+class OptimConfig:
+    epochs: int = 10
+    lr: float = 1e-4
+    weight_decay: float = 1e-4
+    use_amp: bool = False
+    
+@dataclass
+class LoggingConfig:
+    use_wandb: bool = False
+    project_name: str = "feature-reliance"
+    run_name: Optional[str] = None
+    verbose_epoch: int = 1
+
+@dataclass
+class TrainConfig:
+    seed: int = 42
+    device: str = "cuda"
+
+    # 기존 Config 재사용
+    model_spec: ModelSpec = None
+    data_config: DataConfig = None
+    transform_hparams: TransformHyperParams = None
+
+    # 학습 전용 설정만 새로 정의
+    perturbation: str = "localwarp"
+    train_dataset_spec: DatasetSpec = None
+    val_dataset_spec: Optional[DatasetSpec] = None
+
+    class_map_name: str = "imagenet_r_subset_map"
+
+    model_type: Literal["timm_cnn", "timm_vit", "hf_dinov2_cls"] = "timm_cnn"
+    freeze_backbone: bool = True
+    freeze_linear_head: bool = True
+
+    loss_config: LossConfig = None
+    optim_config: OptimConfig = None
+    logging_config: LoggingConfig = None
+
+    def __post_init__(self):
+        if self.loss_config is None:
+            self.loss_config = LossConfig()
+
+        if self.optim_config is None:
+            self.optim_config = OptimConfig()
+
+        if self.logging_config is None:
+            self.logging_config = LoggingConfig()  
