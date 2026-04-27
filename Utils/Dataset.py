@@ -179,7 +179,7 @@ class ImageNetValSubsetDataset(Dataset):
         class_ids: Sequence[int],
         root: Optional[str] = None,
         transform=None,
-        perturbation_transform=False,
+        perturbation_transform=None,
         return_pair=False
     ):
         
@@ -214,6 +214,13 @@ class ImageNetValSubsetDataset(Dataset):
         if self.return_pair and  self.perturbation_transform is not None:
             result = self.base_ds[self.indices[idx]]
             # result['label'] = self.class_id_to_subset_idx[label]
+            # NOTE:
+            # paired intervention 학습/validation에서는 label을 의도적으로
+            # 원래 ImageNet-1K global label space(0~999)로 유지한다.
+            # 이유는 CE loss를 pretrained 1000-class head의 logits에 대해 계산하기 때문이다.
+            #
+            # 반면 standard evaluation mode에서는 ImageNet-R aligned subset 평가를 위해
+            # label을 local 0~199 class index로 remapping한다.
             return result
         
         image, label = self.base_ds[self.indices[idx]]
