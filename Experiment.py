@@ -17,6 +17,7 @@ from rich.progress import (
 from itertools import product
 from pathlib import Path
 import gc
+import time
 
 alpha_grid = [0, 5, 10, 20, 35, 50, 80] # LocalWarp의 alpha 값 후보군
 sigma_grid = [0.5, 1.0, 2.0, 3.5, 6.0]
@@ -27,9 +28,17 @@ sigma_space_grid = [3, 5, 10, 20, 40, 75]
 grid_size_grid = [3, 4, 5, 6, 7, 8, 9, 10, 11, 15] # PatchShuffle의 grid_size 값 후보군
 temp = [1]
 
+def format_seconds(seconds: float) -> str:
+    seconds = int(seconds)
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
 
 if __name__ == "__main__":
+    
+    
     set_seed(42)
     
     # 1. pair grid 정의
@@ -136,6 +145,7 @@ if __name__ == "__main__":
             )
             continue
         
+        start_time = time.time()
         print(f"[{i}/{total_i}] Running {perturb_name} with {pair}")
         
         resnet = timm.create_model("resnet50", pretrained=True)
@@ -227,5 +237,6 @@ if __name__ == "__main__":
 
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-
+        elapsed = time.time() - start_time
+        print(f"Elapsed time: {format_seconds(elapsed)}")
         print()
