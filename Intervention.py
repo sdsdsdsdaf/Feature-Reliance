@@ -21,11 +21,18 @@ from Utils.Config import DataConfig, DatasetSpec, LoggingConfig, LossConfig, Mod
 from Utils.Dataset import ImageNetValFlatDataset, build_sample_indices_from_targets
 from Utils.train_utils import train
 from Utils.utils import IMAGENET_R_CLASS_IDS
+import timm
 
+import warnings
+
+warnings.filterwarnings(
+    "ignore",
+    message="Corrupt EXIF data.*",
+    category=UserWarning,
+)
 
 if __name__ == "__main__":
     
-    import timm
     
     resnet = timm.create_model("resnet50", pretrained=True)
     
@@ -45,14 +52,7 @@ if __name__ == "__main__":
         resize_size=235,
     )
     del resnet
-    
-    data_config = DataConfig(
-        batch_size=128,
-        num_workers=4,
-        pin_memory=False,
-        shuffle=True,
-        datasets=[],
-    )
+
     
     transform_hparams = TransformHyperParams(
         p=1.0,
@@ -102,7 +102,7 @@ if __name__ == "__main__":
     data_config = DataConfig(
         batch_size=128,
         num_workers=4,
-        pin_memory=torch.cuda.is_available(),
+        pin_memory=False,
         shuffle=True,
         datasets=[
             train_dataset_spec,
@@ -130,12 +130,8 @@ if __name__ == "__main__":
         loss_config=LossConfig(
             mode="feature",
             lambda_feat=0.1,
-            lambda_kl=0.0,
+            lambda_kl=0.1,
             temperature=2.0,
-            detach_teacher=True,
-            normalize_feature=True,
-            ce_clean_weight=1.0,
-            ce_pert_weight=1.0,
         ),
 
         optim_config=OptimConfig(
