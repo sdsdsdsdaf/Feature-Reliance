@@ -121,12 +121,13 @@ def build_train_val_dataloaders(config: TrainConfig):
     train_loader = DataLoader(
         train_ds,
         batch_size=data_config.batch_size,
-        shuffle=True,
+        shuffle=data_config.shuffle,
         num_workers=data_config.num_workers,
         pin_memory=data_config.pin_memory,
         drop_last=False,
     )
     
+    val_loader = None
     if val_dataset_spec is not None:
 
         val_ds = build_dataset(
@@ -355,12 +356,10 @@ def train(config: TrainConfig):
     if config.transform_hparams is None:
         raise ValueError("transform_hparams must be provided in TrainConfig")
 
-    device = config.device
-    if device == "cuda" and not torch.cuda.is_available():
-        device = "cpu"
-
-    if device == "cuda":
-        config.data_config.pin_memory = True
+    device_obj = torch.device(config.device)
+    if device_obj.type == "cuda" and not torch.cuda.is_available():
+        device_obj = torch.device("cpu")
+    device = str(device_obj)
 
     if config.logging_config.use_wandb:
         wandb.init(
@@ -402,7 +401,7 @@ def train(config: TrainConfig):
     ).to(device)
     
     scaler = None
-    if config.optim_config.use_amp and device == "cuda":
+    if config.optim_config.use_amp and device_obj.type == "cuda":
         scaler = GradScaler("cuda")
 
     global_step = 0
@@ -455,14 +454,7 @@ if __name__ == "__main__":
         resize_size=235,
     )
     del resnet
-    
-    data_config = DataConfig(
-        batch_size=128,
-        num_workers=4,
-        pin_memory=False,
-        shuffle=True,
-        datasets=[],
-    )
+
     
     transform_hparams = TransformHyperParams(
         p=1.0,
@@ -512,7 +504,7 @@ if __name__ == "__main__":
     data_config = DataConfig(
         batch_size=128,
         num_workers=4,
-        pin_memory=torch.cuda.is_available(),
+        pin_memory=False,
         shuffle=True,
         datasets=[
             train_dataset_spec,
