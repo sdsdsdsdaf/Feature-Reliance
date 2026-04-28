@@ -38,6 +38,24 @@ class ConsistencyLoss(nn.Module):
         
         return loss_kl
     
+    """ # 후에 학습이 잘 되지 않을 시 이 함수로 교체
+    def feature_consistency(self, original_features, perturbed_features):
+        original_features = F.normalize(original_features, p=2, dim=-1)
+        perturbed_features = F.normalize(perturbed_features, p=2, dim=-1)
+
+        teacher_features = (
+            original_features.detach()
+            if self.detach_teacher
+            else original_features
+        )
+
+        return 1.0 - F.cosine_similarity(
+            perturbed_features,
+            teacher_features,
+            dim=-1,
+        ).mean()
+    """
+        
     def feature_consistency(self, original_features, perturbed_features):
         if self.normalize_feature:
             original_features = F.normalize(original_features, p=2, dim=-1)
