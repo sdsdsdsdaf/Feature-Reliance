@@ -18,9 +18,9 @@ class UnifiedModel(nn.Module):
 
     def forward(self, x, return_features: bool = False):
         if self.model_type == "timm_cnn":
-            feat_map = self.backbone.forward_features(x)      # (B, C, H, W)
-            feat = feat_map.mean(dim=[2, 3])                  # (B, C)
-            logits = self.backbone.forward_head(feat)
+            feat_map = self.backbone.forward_features(x)
+            feat = self.backbone.forward_head(feat_map, pre_logits=True)
+            logits = self.backbone.forward_head(feat_map)
 
         elif self.model_type == "timm_vit":
             feat_tokens = self.backbone.forward_features(x)   # usually (B, N, D)
