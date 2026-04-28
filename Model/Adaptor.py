@@ -251,7 +251,7 @@ def inject_adaptors(
             use_trainable_scale=use_trainable_scale,
         )
         
-    elif model_type in ["hf_dino", "dinov2", "dinov2_b14", "dino"]:
+    elif model_type in ["hf_dino", "hf_dinov2_cls", "dinov2_vit-b", "dinov2_vit_b", "dinov2_b14", "dino"]:
         return inject_hf_dino_adaptors(
             model=model,
             target_layers=target,
@@ -260,7 +260,7 @@ def inject_adaptors(
             use_trainable_scale=use_trainable_scale,
         )
 
-    elif model_type in ["timm_vit", "vit", "vit_b16", "vit-b/16"]:
+    elif model_type in ["timm_vit", "vit", "vit-b", "vit_b16", "vit-b/16"]:
         return inject_timm_vit_adaptors(
             model=model,
             target_blocks=target,
