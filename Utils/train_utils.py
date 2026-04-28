@@ -151,10 +151,21 @@ def build_train_model(config: TrainConfig):
     
 
     model_spec = config.model_spec
+    timm_model_name_map = {
+        ("vit-b", "augreg_in1k"): "vit_base_patch16_224.augreg_in1k",
+    }
+    hf_model_name_map = {
+        ("dinov2_vit-b", "imagenet1k-1-layer"): "facebook/dinov2-base-imagenet1k-1-layer",
+    }
 
     if config.model_type in ["timm_cnn", "timm_vit"]:
-        backbone = timm.create_model(
+        backbone_source_name = timm_model_name_map.get(
+            (model_spec.model_name, model_spec.pretrained_weight),
             model_spec.model_name,
+        )
+
+        backbone = timm.create_model(
+            backbone_source_name,
             pretrained=True,
         )
 
@@ -164,8 +175,13 @@ def build_train_model(config: TrainConfig):
         )
 
     elif config.model_type == "hf_dinov2_cls":
-        backbone = AutoModelForImageClassification.from_pretrained(
+        backbone_source_name = hf_model_name_map.get(
+            (model_spec.model_name, model_spec.pretrained_weight),
             model_spec.model_name,
+        )
+
+        backbone = AutoModelForImageClassification.from_pretrained(
+            backbone_source_name,
         )
 
         backbone = inject_adaptors(

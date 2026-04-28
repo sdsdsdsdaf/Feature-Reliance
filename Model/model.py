@@ -24,11 +24,8 @@ class UnifiedModel(nn.Module):
 
         elif self.model_type == "timm_vit":
             feat_tokens = self.backbone.forward_features(x)   # usually (B, N, D)
-            if feat_tokens.ndim == 3:
-                feat = feat_tokens[:, 0]                      # CLS token
-            else:
-                feat = feat_tokens                            # already pooled
-            logits = self.backbone.forward_head(feat)
+            feat = self.backbone.forward_head(feat_tokens, pre_logits=True)
+            logits = self.backbone.forward_head(feat_tokens)
 
         elif self.model_type == "hf_dinov2_cls":
             outputs = self.backbone(

@@ -8,3 +8,4 @@ Cache/*
 
 # 3. 그 안의 내용도 포함시키기 (중요)
 !Cache/MetaData/**
+.codex
