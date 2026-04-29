@@ -119,6 +119,7 @@ if __name__ == "__main__":
         model_spec=resnet_model_spec,
         data_config=data_config,
         transform_hparams=transform_hparams,
+        verbose_model=True,
 
         train_dataset_spec=train_dataset_spec,
         val_dataset_spec=val_dataset_spec,
@@ -149,7 +150,7 @@ if __name__ == "__main__":
         ),
 
         logging_config=LoggingConfig(
-            use_wandb=False,
+            use_wandb=True,
             run_name="resnet50_localwarp_feature",
             verbose_epoch=1,
         ),

@@ -2,6 +2,7 @@ Data/*
 Cache/*
 /**/__pycache__/*
 *.png
+wandb/*
 
 # 2. MetaData 폴더는 제외 (살림)
 !Cache/MetaData/
