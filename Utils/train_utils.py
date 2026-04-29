@@ -456,19 +456,17 @@ def collect_adaptor_summary_metrics(model: nn.Module, prefix: str = "step/adapto
 
     return metrics
 
-def get_adaptor_scale_reg(model: nn.Module):
-    scale_reg = None
+def get_adaptor_scale_reg(model):
+    regs = []
 
     for module in model.modules():
-        if hasattr(module, "scale") and isinstance(module.scale, nn.Parameter):
-            term = module.scale.pow(2).sum()
-            scale_reg = term if scale_reg is None else scale_reg + term
+        if hasattr(module, "scale") and isinstance(module.scale, torch.nn.Parameter):
+            regs.append(module.scale.float().pow(2).sum())
 
-    if scale_reg is None:
-        device = next(model.parameters()).device
-        scale_reg = torch.zeros((), device=device)
+    if len(regs) == 0:
+        return torch.zeros((), device=next(model.parameters()).device)
 
-    return scale_reg
+    return torch.stack(regs).mean()
 
 
 def get_adaptor_delta_reg(model: nn.Module):
