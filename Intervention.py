@@ -1,11 +1,23 @@
+import gc
+from pathlib import Path
+import time
 import warnings
 import os
+
+from Experiment import format_seconds
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 warnings.filterwarnings(
     "ignore",
     message=r".*Metadata Warning, tag 274 had too many entries.*",
     category=UserWarning,
+)
+
+warnings.filterwarnings(
+    "ignore",
+    message=r".*Corrupt EXIF data.*",
+    category=UserWarning,
+    module=r"PIL\.TiffImagePlugin",
 )
 
 
@@ -28,10 +40,10 @@ D. ours-both
 
 import torch
 
-from Utils.Config import DataConfig, DatasetSpec, LoggingConfig, LossConfig, ModelSpec, OptimConfig, TrainConfig, TransformHyperParams, AdaptorConfig
+from Utils.Config import DataConfig, DatasetSpec, EvalScenario, ExtractionConfig, LoggingConfig, LossConfig, ModelSpec, OptimConfig, TrainConfig, TransformHyperParams, AdaptorConfig
 from Utils.Dataset import ImageNetValFlatDataset, build_sample_indices_from_targets
 from Utils.train_utils import train
-from Utils.utils import IMAGENET_R_CLASS_IDS
+from Utils.utils import IMAGENET_R_CLASS_IDS, run_experiments
 import timm
 
 if __name__ == "__main__":
@@ -171,3 +183,142 @@ if __name__ == "__main__":
         
         
     model, history = train(train_config)
+    gc.collect()
+    
+    # InterVention OOD Check
+    data_config = DataConfig(
+        batch_size=512,
+        num_workers=4,
+        pin_memory=False,
+        shuffle=False,
+        datasets=[
+            DatasetSpec(
+                name="imagenet",
+                dataset_type="imagenet_val_flat",
+                root="Data",
+                split="val",
+                num_classes=1000,
+                domain_type="id",
+                id_dataset_name="imagenet"
+            ),
+            
+            DatasetSpec(
+                name="imagenet_200",
+                dataset_type="imagenet_val_subset",
+                root="Data",
+                split="val",
+                num_classes=200,
+                domain_type="id",
+                class_map_name="imagenet_r_subset_map",
+                sample_indices=imagenet_200_indices,
+                labels_map=IMAGENET_R_CLASS_IDS,
+                id_dataset_name="imagenet_200"
+            ),
+            
+            # OOD dataset 추가 시
+            DatasetSpec(
+                name="imagenet_r",
+                dataset_type="imagenet_r",
+                root="Data/imagenet-r",
+                split="val",
+                num_classes=200,
+                domain_type="natural_ood",
+                shift_type="style",
+                class_map_name="imagenet_r_subset_map",
+                eval_protocol_name="imagenet_r_eval",
+                id_dataset_name="imagenet_200"
+            ),
+        ],
+    )
+
+    extraction_config = ExtractionConfig(
+        root_dir="Cache/Intervention/localwarp",
+        device="cuda:0" if torch.cuda.is_available() else "cpu",
+        dtype="float16",
+        overwrite=False,
+        debug_first_batch=False,
+    )
+    
+    metadata_root = Path(extraction_config.root_dir) / "Intervention_MetaData"
+    resnet = timm.create_model("resnet50", pretrained=True)
+    
+    start_time = time.time()
+    
+    model_specs = [
+        ModelSpec(
+            model_name="localwarp_intervention_resnet50",
+            pretrained_weight="in1k",
+            model=model.backbone,
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225],
+            resize_size=235, # ResNet50의 경우 256으로 resize 후 center crop 224 진행 (timm의 기본 전처리 방식)
+        ),
+        ModelSpec(
+            model_name="resnet50",
+            pretrained_weight="in1k",
+            model=resnet,
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225],
+            resize_size=235, # ResNet50의 경우 256으로 resize 후 center crop 224 진행 (timm의 기본 전처리 방식)
+        ),
+    ]
+    
+    # 기본값
+    hparams_kwargs = dict(
+        resize_size=256,
+        p=1.0,
+        prefix="resizecrop",
+
+        bilateral_d=11,
+        sigma_color=170,
+        sigma_space=75,
+
+        gaussian_k=11,
+        gaussian_sigma=2.0,
+        gray_alpha=1.0,
+
+        grid_size=7,
+        alpha_localwarp=35,
+        sigma_localwarp=3.5,
+    )
+
+    # 각 실험 조건에 따라 수기로 변경
+ 
+
+    transform_hparams = TransformHyperParams(**hparams_kwargs)
+
+    
+    try:
+        result = run_experiments(
+            model_specs=model_specs,
+            transform_hparams=transform_hparams,
+            data_config=data_config,
+            extraction_config=extraction_config,
+            metadata_root=metadata_root,
+            perturbations=[
+                "original",
+                "grayscale",
+                "bilateral",
+                "patchshuffle",
+                "patchrotation",
+                "localwarp",
+            ],
+            verbose_image=True,
+            run_validation=True,
+            validation_max_samples=None,
+            max_workers=5,
+        )
+
+    finally:
+        del model_specs
+
+        if "result" in locals():
+            del result
+
+        gc.collect()
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    elapsed = time.time() - start_time
+    print(f"Elapsed time: {format_seconds(elapsed)}")
+    print()
