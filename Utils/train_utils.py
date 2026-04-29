@@ -215,34 +215,50 @@ def collect_adaptor_summary_metrics(model: nn.Module, prefix: str = "step/adapto
 
     return metrics
 
-def set_trainable_params(model:nn.Module, freeze_backbone: bool = True, freeze_linear_head: bool = True):
-    if not freeze_backbone:
-        for p in model.parameters():
-            p.requires_grad = True
-        return model
+def set_trainable_params(
+    model: nn.Module,
+    train_adaptor: bool = True,
+    train_head: bool = False,
+):
+    """
+    Freeze all parameters first, then selectively unfreeze only desired modules.
+    """
 
-    for name, p in model.named_parameters():
-        name_lower = name.lower()
+    # 1. Freeze everything
+    for p in model.parameters():
+        p.requires_grad = False
 
-        is_adapter = (
-            "adapter" in name_lower
-            or "adaptor" in name_lower
-        )
+    # 2. Unfreeze adaptor/adapter modules only
+    if train_adaptor:
+        for name, module in model.named_modules():
+            name_lower = name.lower()
 
-        is_linear_head = (
-            "classifier" in name_lower
-            or "fc" in name_lower
-            or "head" in name_lower
-        )
+            is_adaptor_module = (
+                "adaptor" in name_lower
+                or "adapter" in name_lower
+            )
 
-        if is_adapter:
-            p.requires_grad = True
+            if is_adaptor_module:
+                for p in module.parameters():
+                    p.requires_grad = True
 
-        elif is_linear_head:
-            p.requires_grad = not freeze_linear_head
+    # 3. Optionally unfreeze classifier/head modules
+    if train_head:
+        for name, module in model.named_modules():
+            name_lower = name.lower()
 
-        else:
-            p.requires_grad = False
+            is_head_module = (
+                name_lower == "head"
+                or name_lower.endswith(".head")
+                or name_lower == "classifier"
+                or name_lower.endswith(".classifier")
+                or name_lower == "fc"
+                or name_lower.endswith(".fc")
+            )
+
+            if is_head_module:
+                for p in module.parameters():
+                    p.requires_grad = True
 
     return model
 
