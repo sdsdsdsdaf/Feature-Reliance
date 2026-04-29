@@ -149,7 +149,7 @@ if __name__ == "__main__":
             epochs=5,
             lr=1e-4,
             weight_decay=1e-4,
-            use_amp=True,
+            use_amp=False,
         ),
 
         logging_config=LoggingConfig(
