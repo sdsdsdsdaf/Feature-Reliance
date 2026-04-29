@@ -1123,6 +1123,7 @@ def run_experiments(
     transform_hparams: TransformHyperParams,
     data_config: DataConfig,
     extraction_config: ExtractionConfig,
+    metadata_root: str | Path,
     scenarios: Optional[List[EvalScenario]] = None,
     perturbations: Optional[List[str]] = None,
     verbose_image: bool = False,
@@ -1156,7 +1157,7 @@ def run_experiments(
         scenarios=scenarios,
     )
 
-    root = Path(extraction_config.root_dir) / "MetaData"
+    root = Path(metadata_root)
     trial_id = get_next_trial_id(root)
     run_dir = root / f"trial_{trial_id:04d}"
 

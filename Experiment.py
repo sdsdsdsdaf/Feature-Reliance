@@ -213,6 +213,7 @@ if __name__ == "__main__":
                 transform_hparams=transform_hparams,
                 data_config=data_config,
                 extraction_config=extraction_config,
+                metadata_root=metadata_root,
                 perturbations=[
                     "original",
                     "grayscale",
