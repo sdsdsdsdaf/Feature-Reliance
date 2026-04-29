@@ -55,13 +55,15 @@ class LinearAdaptor(nn.Module):
         init_scale=1e-3,
         dropout=0.0,
         safe_fp32_delta=True,
+        activation="gelu",
     ):
         super().__init__()
         hidden = max(dim // reduction, 1)
+        self.activation = activation
 
         self.norm = nn.LayerNorm(dim) if use_norm else nn.Identity()
         self.down = nn.Linear(dim, hidden)
-        self.act = nn.GELU()
+        self.act = _build_act_function(self.activation)
         self.drop = nn.Dropout(dropout)
         self.up = nn.Linear(hidden, dim)
 
@@ -112,6 +114,16 @@ class LinearAdaptor(nn.Module):
 
         return x + adapted
     
+def _build_act_function(act_name:str):
+    if act_name == "gelu":
+        return nn.GELU()
+    if act_name == "relu":
+        return nn.ReLU()
+    if act_name == "none":
+        return nn.Identity()
+
+    raise ValueError(f'Activatation Type in ["gelu", "relu", "none"] but you entered "{act_name}"')
+
 class ConvAdaptor(nn.Module):
     def __init__(
         self,
@@ -120,13 +132,15 @@ class ConvAdaptor(nn.Module):
         use_trainable_scale=True,
         init_scale=1e-3,
         dropout=0.0,
+        activation="gelu",
         safe_fp32_delta=True,
     ):
         super().__init__()
         hidden = max(channels // reduction, 1)
+        self.activation = activation
 
         self.down = nn.Conv2d(channels, hidden, kernel_size=1)
-        self.act = nn.GELU()
+        self.act = _build_act_function(self.activation)
         self.drop = nn.Dropout2d(dropout)
         self.up = nn.Conv2d(hidden, channels, kernel_size=1)
 
@@ -224,6 +238,7 @@ def inject_resnet_adaptors(
     use_norm=False,
     init_scale=1e-3,
     dropout=0.0,
+    act_func="gelu",
 ):
     channels = {
         "layer1": 256,
@@ -251,6 +266,7 @@ def inject_resnet_adaptors(
                 use_trainable_scale=use_trainable_scale,
                 init_scale=init_scale,
                 dropout=dropout,
+                activation=act_func
             )
         )
 
@@ -264,6 +280,7 @@ def inject_timm_vit_adaptors(
     use_trainable_scale=False,
     init_scale=1e-3,
     dropout=0.0,
+    act_func="gelu"
 ):
     num_blocks = len(model.blocks)
     dim = model.embed_dim
@@ -285,6 +302,7 @@ def inject_timm_vit_adaptors(
         "use_trainable_scale": use_trainable_scale,
         "init_scale": init_scale,
         "dropout": dropout,
+        "activation": act_func
     }
     
     for idx in indices:
@@ -301,6 +319,7 @@ def inject_hf_dino_adaptors(
     use_trainable_scale=False,
     init_scale=1e-3,
     dropout=0.0,
+    act_func="gelu"
 ):
     num_layers = len(model.dinov2.encoder.layer)
     dim = model.config.hidden_size
@@ -322,6 +341,7 @@ def inject_hf_dino_adaptors(
         "use_trainable_scale": use_trainable_scale,
         "init_scale": init_scale,
         "dropout": dropout,
+        "activation": act_func
     }
     
     for idx in indices:
@@ -339,6 +359,7 @@ def inject_adaptors(
     use_trainable_scale=False,
     init_scale=1e-3,
     dropout=0.0,
+    act_func="gelu"
 ):
     model_type = model_type.lower()
 
@@ -350,6 +371,7 @@ def inject_adaptors(
             use_trainable_scale=use_trainable_scale,
             init_scale=init_scale,
             dropout=dropout,
+            act_func=act_func,
         )
         
     elif model_type in ["hf_dino", "dinov2", "dinov2_b14", "dino"]:
@@ -361,6 +383,7 @@ def inject_adaptors(
             use_trainable_scale=use_trainable_scale,
             init_scale=init_scale,
             dropout=dropout,
+            act_func=act_func,
         )
 
     elif model_type in ["timm_vit", "vit", "vit_b16", "vit-b/16", "vit-b"]:
@@ -372,6 +395,7 @@ def inject_adaptors(
             use_trainable_scale=use_trainable_scale,
             init_scale=init_scale,
             dropout=dropout,
+            act_func=act_func,
         )
 
     else:
