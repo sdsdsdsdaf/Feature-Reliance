@@ -248,7 +248,7 @@ class LossConfig:
     normalize_feature: bool = True
     ce_clean_weight: float = 1.0
     ce_pert_weight: float = 1.0
-    eps=1e-12
+    eps: float = 1e-6
     
 @dataclass
 class OptimConfig:
