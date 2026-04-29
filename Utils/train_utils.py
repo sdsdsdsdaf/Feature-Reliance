@@ -55,22 +55,25 @@ from collections import defaultdict
 import torch.nn as nn
 
 
+import torch.nn as nn
+# ============================================================
+# Parameter counting utilities
+# ============================================================
+
 def count_params(module: nn.Module, trainable_only: bool = False) -> int:
     """
     Count parameters in a module.
     """
-    params = module.parameters()
-
     if trainable_only:
-        return sum(p.numel() for p in params if p.requires_grad)
+        return sum(p.numel() for p in module.parameters() if p.requires_grad)
 
-    return sum(p.numel() for p in params)
+    return sum(p.numel() for p in module.parameters())
 
 
 def count_unique_params_from_modules(modules):
     """
     Count unique parameters from a list of modules.
-    Avoid double-counting shared parameters.
+    Avoid double-counting shared or nested parameters.
     """
     seen = set()
     total = 0
@@ -92,60 +95,143 @@ def count_unique_params_from_modules(modules):
     return total, trainable
 
 
+def get_module_param_ids(modules):
+    """
+    Return unique parameter ids belonging to the given modules.
+    """
+    param_ids = set()
+
+    for module in modules:
+        for p in module.parameters():
+            param_ids.add(id(p))
+
+    return param_ids
+
+
+# ============================================================
+# Module detection
+# ============================================================
+
 def get_adaptor_modules(model: nn.Module):
     """
-    Find adaptor modules by class name.
-    """
-    adaptor_class_names = {"LinearAdaptor", "ConvAdaptor"}
+    Find adaptor modules.
 
-    return [
-        module
-        for module in model.modules()
-        if module.__class__.__name__ in adaptor_class_names
-    ]
+    This checks both:
+    1. module class name: LinearAdaptor, ConvAdaptor
+    2. module path name containing adaptor/adapter
+    """
+    adaptor_class_names = {
+        "LinearAdaptor",
+        "ConvAdaptor",
+    }
+
+    adaptor_modules = []
+
+    for name, module in model.named_modules():
+        name_lower = name.lower()
+        class_name = module.__class__.__name__
+
+        is_adaptor_module = (
+            class_name in adaptor_class_names
+            or "adaptor" in name_lower
+            or "adapter" in name_lower
+        )
+
+        if is_adaptor_module:
+            adaptor_modules.append(module)
+
+    return adaptor_modules
 
 
 def get_head_modules(model: nn.Module):
     """
-    Find likely head modules from common attribute names.
+    Find likely classifier/head modules from nested module paths.
+
+    This is safer than checking only top-level attributes like model.head.
     """
     head_modules = []
 
-    candidate_attrs = [
+    head_names = {
         "head",
         "heads",
         "classifier",
         "classifiers",
         "fc",
-    ]
+    }
 
-    for attr in candidate_attrs:
-        if hasattr(model, attr):
-            module = getattr(model, attr)
+    for name, module in model.named_modules():
+        if name == "":
+            continue
 
-            if isinstance(module, nn.Module):
-                head_modules.append(module)
+        name_lower = name.lower()
+        last_name = name_lower.split(".")[-1]
+
+        is_head_module = last_name in head_names
+
+        if is_head_module and isinstance(module, nn.Module):
+            head_modules.append(module)
 
     return head_modules
 
 
+# ============================================================
+# Summary printing
+# ============================================================
+
 def print_model_param_summary(model: nn.Module):
     """
-    Print clean parameter summary.
+    Print parameter summary using unique parameter ids.
+
+    Priority:
+    - adaptor parameters are counted as Adaptor
+    - remaining head parameters are counted as Head
+    - all others are counted as Other / Backbone
     """
-
-    total_params = count_params(model, trainable_only=False)
-    trainable_params = count_params(model, trainable_only=True)
-    frozen_params = total_params - trainable_params
-
     adaptor_modules = get_adaptor_modules(model)
     head_modules = get_head_modules(model)
 
-    adaptor_total, adaptor_trainable = count_unique_params_from_modules(adaptor_modules)
-    head_total, head_trainable = count_unique_params_from_modules(head_modules)
+    adaptor_param_ids = get_module_param_ids(adaptor_modules)
+    head_param_ids = get_module_param_ids(head_modules)
 
-    other_total = total_params - adaptor_total - head_total
-    other_trainable = trainable_params - adaptor_trainable - head_trainable
+    total_params = 0
+    trainable_params = 0
+
+    adaptor_total = 0
+    adaptor_trainable = 0
+
+    head_total = 0
+    head_trainable = 0
+
+    other_total = 0
+    other_trainable = 0
+
+    for name, p in model.named_parameters():
+        n = p.numel()
+        pid = id(p)
+        is_trainable = p.requires_grad
+
+        total_params += n
+
+        if is_trainable:
+            trainable_params += n
+
+        # Adaptor has priority over head if names/modules overlap
+        if pid in adaptor_param_ids:
+            adaptor_total += n
+            if is_trainable:
+                adaptor_trainable += n
+
+        elif pid in head_param_ids:
+            head_total += n
+            if is_trainable:
+                head_trainable += n
+
+        else:
+            other_total += n
+            if is_trainable:
+                other_trainable += n
+
+    frozen_params = total_params - trainable_params
 
     rows = [
         ("Total Model", total_params, trainable_params),
@@ -158,14 +244,19 @@ def print_model_param_summary(model: nn.Module):
     print("\n" + "=" * 80)
     print("Model Parameter Summary")
     print("=" * 80)
-    print(f"{'Module':<20} {'Total Params':>18} {'Trainable Params':>20} {'Trainable %':>14}")
+    print(
+        f"{'Module':<20} "
+        f"{'Total Params':>18} "
+        f"{'Trainable Params':>20} "
+        f"{'Trainable %':>14}"
+    )
     print("-" * 80)
 
-    for name, total, trainable in rows:
+    for row_name, total, trainable in rows:
         ratio = (trainable / total * 100) if total > 0 else 0.0
 
         print(
-            f"{name:<20} "
+            f"{row_name:<20} "
             f"{total:>18,} "
             f"{trainable:>20,} "
             f"{ratio:>13.2f}%"
@@ -175,6 +266,150 @@ def print_model_param_summary(model: nn.Module):
     print(f"Number of adaptor modules: {len(adaptor_modules)}")
     print(f"Number of head modules:    {len(head_modules)}")
     print("=" * 80 + "\n")
+
+
+# ============================================================
+# Debug utilities
+# ============================================================
+
+def print_trainable_params(model: nn.Module):
+    """
+    Print all currently trainable parameters.
+    """
+    total = 0
+
+    print("=" * 100)
+    print("Trainable Parameters")
+    print("=" * 100)
+
+    for name, p in model.named_parameters():
+        if p.requires_grad:
+            n = p.numel()
+            total += n
+            print(f"{name:<80} {str(tuple(p.shape)):<25} {n:,}")
+
+    print("-" * 100)
+    print(f"Total trainable params: {total:,}")
+    print("=" * 100)
+
+
+def print_trainable_non_adaptor_params(model: nn.Module):
+    """
+    Print trainable parameters excluding adaptor/adapter parameters.
+    This should be empty when freeze_backbone=True and freeze_linear_head=True.
+    """
+    total = 0
+
+    print("=" * 100)
+    print("Trainable Parameters Excluding Adaptor")
+    print("=" * 100)
+
+    for name, p in model.named_parameters():
+        name_lower = name.lower()
+
+        is_adaptor = (
+            "adaptor" in name_lower
+            or "adapter" in name_lower
+        )
+
+        if p.requires_grad and not is_adaptor:
+            n = p.numel()
+            total += n
+            print(f"{name:<80} {str(tuple(p.shape)):<25} {n:,}")
+
+    print("-" * 100)
+    print(f"Total non-adaptor trainable params: {total:,}")
+    print("=" * 100)
+
+
+def print_detected_adaptor_modules(model: nn.Module):
+    """
+    Print detected adaptor modules.
+    """
+    adaptor_modules = get_adaptor_modules(model)
+
+    print("=" * 100)
+    print("Detected Adaptor Modules")
+    print("=" * 100)
+
+    for target_module in adaptor_modules:
+        for name, module in model.named_modules():
+            if module is target_module:
+                total = sum(p.numel() for p in module.parameters())
+                trainable = sum(p.numel() for p in module.parameters() if p.requires_grad)
+
+                print(
+                    f"{name:<70} "
+                    f"{module.__class__.__name__:<25} "
+                    f"total={total:,} "
+                    f"trainable={trainable:,}"
+                )
+                break
+
+    print("=" * 100)
+
+
+def print_detected_head_modules(model: nn.Module):
+    """
+    Print detected head modules.
+    """
+    head_modules = get_head_modules(model)
+
+    print("=" * 100)
+    print("Detected Head Modules")
+    print("=" * 100)
+
+    for target_module in head_modules:
+        for name, module in model.named_modules():
+            if module is target_module:
+                total = sum(p.numel() for p in module.parameters())
+                trainable = sum(p.numel() for p in module.parameters() if p.requires_grad)
+
+                print(
+                    f"{name:<70} "
+                    f"{module.__class__.__name__:<25} "
+                    f"total={total:,} "
+                    f"trainable={trainable:,}"
+                )
+                break
+
+    print("=" * 100)
+
+
+def assert_only_adaptor_trainable(model: nn.Module):
+    """
+    Assert that only adaptor/adapter parameters are trainable.
+    Use this when freeze_backbone=True and freeze_linear_head=True.
+    """
+    bad = []
+
+    for name, p in model.named_parameters():
+        name_lower = name.lower()
+
+        is_adaptor = (
+            "adaptor" in name_lower
+            or "adapter" in name_lower
+        )
+
+        if p.requires_grad and not is_adaptor:
+            bad.append((name, tuple(p.shape), p.numel()))
+
+    if bad:
+        print("=" * 100)
+        print("Unexpected Trainable Parameters")
+        print("=" * 100)
+
+        for name, shape, n in bad:
+            print(f"{name:<80} {str(shape):<25} {n:,}")
+
+        print("=" * 100)
+
+        total = sum(x[2] for x in bad)
+
+        raise RuntimeError(
+            f"Found {len(bad)} non-adaptor trainable parameters. "
+            f"Total = {total:,}"
+        )
     
 def collect_adaptor_summary_metrics(model: nn.Module, prefix: str = "step/adaptor_summary"):
     grad_norms = []
