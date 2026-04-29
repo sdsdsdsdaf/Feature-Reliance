@@ -46,46 +46,99 @@ def normalize_resnet_layers(target_layers):
     return normalized
 
 class LinearAdaptor(nn.Module):
-    def __init__(self, dim, reduction=16, use_norm=False, use_trainable_scale=False, init_scale=1e-3):
+    def __init__(
+        self,
+        dim,
+        reduction=16,
+        use_norm=False,
+        use_trainable_scale=False,
+        init_scale=1e-3,
+        dropout=0.0,
+    ):
         super().__init__()
         hidden = max(dim // reduction, 1)
 
         self.norm = nn.LayerNorm(dim) if use_norm else nn.Identity()
         self.down = nn.Linear(dim, hidden)
         self.act = nn.GELU()
+        self.drop = nn.Dropout(dropout)
         self.up = nn.Linear(hidden, dim)
-        self.scale = nn.Parameter(torch.ones(1)*init_scale) if use_trainable_scale else init_scale
+
+        if use_trainable_scale:
+            self.scale = nn.Parameter(torch.tensor(float(init_scale)))
+        else:
+            self.register_buffer("scale", torch.tensor(float(init_scale)))
+
+        self.last_delta = None
+        self.last_delta_ratio = None
         
         # Important: start as near-identity
         nn.init.zeros_(self.up.weight)
         nn.init.zeros_(self.up.bias)
 
     def forward(self, x):
-        adapted = self.up(self.act(self.down(self.norm(x))))
-        adapted = self.scale * adapted
+        z = self.norm(x)
+        z = self.down(z)
+        z = self.act(z)
+        z = self.drop(z)
+        z = self.up(z)
+
+        adapted = self.scale * z
+
+        if self.training:
+            self.last_delta = adapted
+            with torch.no_grad():
+                self.last_delta_ratio = (
+                    adapted.detach().reshape(adapted.shape[0], -1).norm(dim=1).mean()
+                    / (x.detach().reshape(x.shape[0], -1).norm(dim=1).mean() + 1e-8)
+                )
             
         return x + adapted
     
 class ConvAdaptor(nn.Module):
-    def __init__(self, channels, reduction=16, use_trainable_scale=True, init_scale=1e-3):
+    def __init__(
+        self,
+        channels,
+        reduction=16,
+        use_trainable_scale=True,
+        init_scale=1e-3,
+        dropout=0.0,
+    ):
         super().__init__()
         hidden = max(channels // reduction, 1)
 
         self.down = nn.Conv2d(channels, hidden, kernel_size=1)
         self.act = nn.GELU()
+        self.drop = nn.Dropout2d(dropout)
         self.up = nn.Conv2d(hidden, channels, kernel_size=1)
 
-        self.scale = (
-            nn.Parameter(torch.ones(1) * init_scale)
-            if use_trainable_scale else 1
-        )
+        if use_trainable_scale:
+            self.scale = nn.Parameter(torch.tensor(float(init_scale)))
+        else:
+            self.register_buffer("scale", torch.tensor(float(init_scale)))
+
+        self.last_delta = None
+        self.last_delta_ratio = None
 
         nn.init.zeros_(self.up.weight)
         nn.init.zeros_(self.up.bias)
 
     def forward(self, x):
-        adapted = self.up(self.act(self.down(x)))
-        adapted = self.scale * adapted
+        z = self.down(x)
+        z = self.act(z)
+        z = self.drop(z)
+        z = self.up(z)
+
+        adapted = self.scale * z
+
+        if self.training:
+            self.last_delta = adapted
+            with torch.no_grad():
+                self.last_delta_ratio = (
+                    adapted.detach().reshape(adapted.shape[0], -1).norm(dim=1).mean()
+                    / (x.detach().reshape(x.shape[0], -1).norm(dim=1).mean() + 1e-8)
+                )
+
         return x + adapted
     
 class ConvBlockWithAdaptor(nn.Module):
@@ -136,6 +189,7 @@ def inject_resnet_adaptors(
     use_trainable_scale=False,
     use_norm=False,
     init_scale=1e-3,
+    dropout=0.0,
 ):
     channels = {
         "layer1": 256,
@@ -162,6 +216,7 @@ def inject_resnet_adaptors(
                 reduction=reduction, 
                 use_trainable_scale=use_trainable_scale,
                 init_scale=init_scale,
+                dropout=dropout,
             )
         )
 
@@ -174,6 +229,7 @@ def inject_timm_vit_adaptors(
     use_norm=False,
     use_trainable_scale=False,
     init_scale=1e-3,
+    dropout=0.0,
 ):
     num_blocks = len(model.blocks)
     dim = model.embed_dim
@@ -194,6 +250,7 @@ def inject_timm_vit_adaptors(
         "use_norm": use_norm,
         "use_trainable_scale": use_trainable_scale,
         "init_scale": init_scale,
+        "dropout": dropout,
     }
     
     for idx in indices:
@@ -209,6 +266,7 @@ def inject_hf_dino_adaptors(
     use_norm=False,
     use_trainable_scale=False,
     init_scale=1e-3,
+    dropout=0.0,
 ):
     num_layers = len(model.dinov2.encoder.layer)
     dim = model.config.hidden_size
@@ -229,6 +287,7 @@ def inject_hf_dino_adaptors(
         "use_norm": use_norm,
         "use_trainable_scale": use_trainable_scale,
         "init_scale": init_scale,
+        "dropout": dropout,
     }
     
     for idx in indices:
@@ -245,6 +304,7 @@ def inject_adaptors(
     use_norm=False,
     use_trainable_scale=False,
     init_scale=1e-3,
+    dropout=0.0,
 ):
     model_type = model_type.lower()
 
@@ -255,6 +315,7 @@ def inject_adaptors(
             reduction=reduction,
             use_trainable_scale=use_trainable_scale,
             init_scale=init_scale,
+            dropout=dropout,
         )
         
     elif model_type in ["hf_dino", "dinov2", "dinov2_b14", "dino"]:
@@ -265,6 +326,7 @@ def inject_adaptors(
             use_norm=use_norm,
             use_trainable_scale=use_trainable_scale,
             init_scale=init_scale,
+            dropout=dropout,
         )
 
     elif model_type in ["timm_vit", "vit", "vit_b16", "vit-b/16", "vit-b"]:
@@ -275,6 +337,7 @@ def inject_adaptors(
             use_norm=use_norm,
             use_trainable_scale=use_trainable_scale,
             init_scale=init_scale,
+            dropout=dropout,
         )
 
     else:
