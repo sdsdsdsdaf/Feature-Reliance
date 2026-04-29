@@ -144,7 +144,7 @@ if __name__ == "__main__":
         ),
 
         optim_config=OptimConfig(
-            epochs=3,
+            epochs=5,
             lr=1e-4,
             weight_decay=1e-4,
             use_amp=True,
