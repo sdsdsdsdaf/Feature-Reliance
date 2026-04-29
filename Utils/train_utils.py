@@ -732,6 +732,7 @@ def build_train_model(config: TrainConfig):
             use_trainable_scale=adaptor_config.use_trainable_scale,
             init_scale=adaptor_config.init_scale,
             dropout=adaptor_config.dropout,
+            act_func=config.optim_config.activation_function,
         )
 
     elif config.model_type == "hf_dinov2_cls":
@@ -746,13 +747,14 @@ def build_train_model(config: TrainConfig):
 
         backbone = inject_adaptors(
             backbone,
-            model_spec.model_name,
+            "hf_dino",
             target=adaptor_config.target_layers,
             reduction=adaptor_config.reduction,
             use_norm=adaptor_config.use_norm,
             use_trainable_scale=adaptor_config.use_trainable_scale,
             init_scale=adaptor_config.init_scale,
             dropout=adaptor_config.dropout,
+            act_func=config.optim_config.activation_function,
         )
 
     else:

@@ -258,6 +258,7 @@ class OptimConfig:
     head_lr: Optional[float] = None
     weight_decay: float = 1e-4
     use_amp: bool = False
+    activation_function: str = "gelu" 
     
 @dataclass
 class LoggingConfig:
