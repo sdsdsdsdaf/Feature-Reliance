@@ -217,47 +217,60 @@ def collect_adaptor_summary_metrics(model: nn.Module, prefix: str = "step/adapto
 
 def set_trainable_params(
     model: nn.Module,
-    train_adaptor: bool = True,
-    train_head: bool = False,
+    freeze_backbone: bool = True,
+    freeze_linear_head: bool = True,
 ):
     """
-    Freeze all parameters first, then selectively unfreeze only desired modules.
+    Keep the original function signature.
+
+    Behavior:
+    - freeze_backbone=False:
+        train everything.
+    - freeze_backbone=True:
+        freeze everything first,
+        then unfreeze adaptor/adapter modules,
+        and optionally unfreeze linear head.
     """
 
-    # 1. Freeze everything
+    # Original behavior: train all parameters
+    if not freeze_backbone:
+        for p in model.parameters():
+            p.requires_grad = True
+        return model
+
+    # 1. Freeze everything first
     for p in model.parameters():
         p.requires_grad = False
 
-    # 2. Unfreeze adaptor/adapter modules only
-    if train_adaptor:
-        for name, module in model.named_modules():
-            name_lower = name.lower()
+    # 2. Unfreeze adaptor/adapter modules
+    for name, module in model.named_modules():
+        name_lower = name.lower()
 
-            is_adaptor_module = (
-                "adaptor" in name_lower
-                or "adapter" in name_lower
-            )
+        is_adaptor_module = (
+            "adapter" in name_lower
+            or "adaptor" in name_lower
+        )
 
-            if is_adaptor_module:
-                for p in module.parameters():
-                    p.requires_grad = True
+        if is_adaptor_module:
+            for p in module.parameters(recurse=True):
+                p.requires_grad = True
 
     # 3. Optionally unfreeze classifier/head modules
-    if train_head:
+    if not freeze_linear_head:
         for name, module in model.named_modules():
             name_lower = name.lower()
 
-            is_head_module = (
-                name_lower == "head"
-                or name_lower.endswith(".head")
-                or name_lower == "classifier"
+            is_linear_head_module = (
+                name_lower == "classifier"
                 or name_lower.endswith(".classifier")
                 or name_lower == "fc"
                 or name_lower.endswith(".fc")
+                or name_lower == "head"
+                or name_lower.endswith(".head")
             )
 
-            if is_head_module:
-                for p in module.parameters():
+            if is_linear_head_module:
+                for p in module.parameters(recurse=True):
                     p.requires_grad = True
 
     return model

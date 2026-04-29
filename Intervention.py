@@ -128,7 +128,7 @@ if __name__ == "__main__":
 
         model_type="timm_cnn",
         freeze_backbone=True,
-        freeze_linear_head=False,
+        freeze_linear_head=True,
 
         loss_config=LossConfig(
             mode="feature",
