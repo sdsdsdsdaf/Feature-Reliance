@@ -241,6 +241,8 @@ class LossConfig:
     feature_loss_type: str = "consine" # "cosine", "mse", "mse_sum"
     lambda_kl: float = 1.0
     lambda_feat: float = 1.0
+    lambda_scale: float = 0.0
+    lambda_delta: float = 0.0
     temperature: float = 1.0
     detach_teacher: bool = True
     normalize_feature: bool = True
@@ -252,6 +254,8 @@ class LossConfig:
 class OptimConfig:
     epochs: int = 10
     lr: float = 1e-4
+    adaptor_lr: Optional[float] = None
+    head_lr: Optional[float] = None
     weight_decay: float = 1e-4
     use_amp: bool = False
     
@@ -268,6 +272,7 @@ class AdaptorConfig:
     use_norm: bool = False 
     use_trainable_scale: bool = False
     init_scale: float = 1e-3
+    dropout: float = 0.0
     target_layers: str|int|List[str]|List[int] ="last1"
 
 @dataclass

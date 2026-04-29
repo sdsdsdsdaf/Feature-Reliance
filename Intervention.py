@@ -136,6 +136,8 @@ if __name__ == "__main__":
             feature_loss_type="cosine",
             lambda_feat=1.0,
             lambda_kl=0.1,
+            lambda_scale=1e-3,
+            lambda_delta=0.0,
             temperature=2.0,
             detach_teacher=True,
             normalize_feature=True,

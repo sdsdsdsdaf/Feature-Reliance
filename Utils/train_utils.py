@@ -456,6 +456,124 @@ def collect_adaptor_summary_metrics(model: nn.Module, prefix: str = "step/adapto
 
     return metrics
 
+def get_adaptor_scale_reg(model: nn.Module):
+    scale_reg = None
+
+    for module in model.modules():
+        if hasattr(module, "scale") and isinstance(module.scale, nn.Parameter):
+            term = module.scale.pow(2).sum()
+            scale_reg = term if scale_reg is None else scale_reg + term
+
+    if scale_reg is None:
+        device = next(model.parameters()).device
+        scale_reg = torch.zeros((), device=device)
+
+    return scale_reg
+
+
+def get_adaptor_delta_reg(model: nn.Module):
+    regs = []
+
+    for module in model.modules():
+        if hasattr(module, "last_delta") and module.last_delta is not None:
+            regs.append(module.last_delta.pow(2).mean())
+
+    if not regs:
+        device = next(model.parameters()).device
+        return torch.zeros((), device=device)
+
+    return torch.stack(regs).mean()
+
+
+def collect_adaptor_delta_ratios(model: nn.Module, prefix: str = "step/adaptor_delta_ratio"):
+    ratios = []
+
+    for module in model.modules():
+        if hasattr(module, "last_delta_ratio") and module.last_delta_ratio is not None:
+            ratios.append(float(module.last_delta_ratio))
+
+    if not ratios:
+        return {}
+
+    return {
+        f"{prefix}/mean": sum(ratios) / len(ratios),
+        f"{prefix}/max": max(ratios),
+        f"{prefix}/min": min(ratios),
+    }
+
+
+def build_optimizer_param_groups(model: nn.Module, optim_config: OptimConfig):
+    adaptor_modules = get_adaptor_modules(model)
+    head_modules = get_head_modules(model)
+    adaptor_param_ids = get_module_param_ids(adaptor_modules)
+    head_param_ids = get_module_param_ids(head_modules)
+
+    adaptor_decay_params = []
+    adaptor_no_decay_params = []
+    head_decay_params = []
+    head_no_decay_params = []
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+
+        name_lower = name.lower()
+        is_no_decay = (
+            name_lower.endswith(".bias")
+            or "norm" in name_lower
+            or name_lower.endswith(".scale")
+            or ".scale" in name_lower
+        )
+
+        param_id = id(param)
+        is_head = param_id in head_param_ids
+        is_adaptor = param_id in adaptor_param_ids or not is_head
+
+        if is_adaptor:
+            if is_no_decay:
+                adaptor_no_decay_params.append(param)
+            else:
+                adaptor_decay_params.append(param)
+        elif is_head:
+            if is_no_decay:
+                head_no_decay_params.append(param)
+            else:
+                head_decay_params.append(param)
+
+    adaptor_lr = optim_config.adaptor_lr or optim_config.lr
+    head_lr = optim_config.head_lr or optim_config.lr
+
+    groups = []
+    if adaptor_decay_params:
+        groups.append({
+            "params": adaptor_decay_params,
+            "lr": adaptor_lr,
+            "weight_decay": optim_config.weight_decay,
+        })
+    if adaptor_no_decay_params:
+        groups.append({
+            "params": adaptor_no_decay_params,
+            "lr": adaptor_lr,
+            "weight_decay": 0.0,
+        })
+    if head_decay_params:
+        groups.append({
+            "params": head_decay_params,
+            "lr": head_lr,
+            "weight_decay": optim_config.weight_decay,
+        })
+    if head_no_decay_params:
+        groups.append({
+            "params": head_no_decay_params,
+            "lr": head_lr,
+            "weight_decay": 0.0,
+        })
+
+    if not groups:
+        raise ValueError("No trainable parameters found for optimizer.")
+
+    return groups
+
 def set_trainable_params(
     model: nn.Module,
     freeze_backbone: bool = True,
@@ -614,7 +732,8 @@ def build_train_model(config: TrainConfig):
             reduction=adaptor_config.reduction,
             use_norm=adaptor_config.use_norm,
             use_trainable_scale=adaptor_config.use_trainable_scale,
-            init_scale=adaptor_config.init_scale
+            init_scale=adaptor_config.init_scale,
+            dropout=adaptor_config.dropout,
         )
 
     elif config.model_type == "hf_dinov2_cls":
@@ -635,6 +754,7 @@ def build_train_model(config: TrainConfig):
             use_norm=adaptor_config.use_norm,
             use_trainable_scale=adaptor_config.use_trainable_scale,
             init_scale=adaptor_config.init_scale,
+            dropout=adaptor_config.dropout,
         )
 
     else:
@@ -664,6 +784,7 @@ def train_one_epoch(
     val_dataloader,
     optimizer,
     criterion,
+    loss_config,
     device,
     scaler=None,
     epoch: int = 0,
@@ -680,6 +801,8 @@ def train_one_epoch(
     train_ce_clean = 0.0
     train_ce_pert = 0.0
     train_cons = 0.0
+    train_scale_reg = 0.0
+    train_delta_reg = 0.0
 
     train_clean_correct = 0
     train_pert_correct = 0
@@ -703,6 +826,17 @@ def train_one_epoch(
                 original_features=feat_clean,
                 perturbed_features=feat_pert,
             )
+
+        scale_reg = get_adaptor_scale_reg(model)
+        delta_reg = get_adaptor_delta_reg(model)
+        loss = (
+            loss
+            + loss_config.lambda_scale * scale_reg
+            + loss_config.lambda_delta * delta_reg
+        )
+        loss_dict["loss_scale_reg"] = scale_reg.detach()
+        loss_dict["loss_delta_reg"] = delta_reg.detach()
+        loss_dict["loss_total_with_reg"] = loss.detach()
 
         assert_finite(
             stage="train",
@@ -750,18 +884,26 @@ def train_one_epoch(
         train_ce_clean += loss_dict["loss_ce_clean"].item()
         train_ce_pert += loss_dict["loss_ce_pert"].item()
         train_cons += loss_dict["loss_consistency"].item()
+        train_scale_reg += scale_reg.item()
+        train_delta_reg += delta_reg.item()
         adaptor_metrics = collect_adaptor_summary_metrics(model)
+        adaptor_delta_metrics = collect_adaptor_delta_ratios(model)
 
         step_metrics = {
             "step/train_loss": loss.item(),
             "step/train_ce_clean": loss_dict["loss_ce_clean"].item(),
             "step/train_ce_pert": loss_dict["loss_ce_pert"].item(),
             "step/train_consistency": loss_dict["loss_consistency"].item(),
+            "reg/scale_reg": scale_reg.item(),
+            "reg/delta_reg": delta_reg.item(),
+            "reg/lambda_scale": loss_config.lambda_scale,
+            "reg/lambda_delta": loss_config.lambda_delta,
             "step/train_acc_clean": clean_correct / batch_total,
             "step/train_acc_pert": pert_correct / batch_total,
             "epoch": epoch + 1,
         }
         step_metrics.update(adaptor_metrics)
+        step_metrics.update(adaptor_delta_metrics)
 
         if use_wandb:
             import wandb
@@ -776,6 +918,8 @@ def train_one_epoch(
         "train/ce_clean": train_ce_clean / n_train,
         "train/ce_pert": train_ce_pert / n_train,
         "train/consistency": train_cons / n_train,
+        "train/scale_reg": train_scale_reg / n_train,
+        "train/delta_reg": train_delta_reg / n_train,
         "train/acc_clean": train_clean_correct / train_total,
         "train/acc_pert": train_pert_correct / train_total,
         "epoch": epoch + 1,
@@ -935,6 +1079,7 @@ def train(config: TrainConfig):
                 "transform_hparams": config.transform_hparams.__dict__,
                 "loss_config": config.loss_config.__dict__,
                 "optim_config": config.optim_config.__dict__,
+                "adaptor_config": config.adpator_config.__dict__,
                 "perturbation": config.perturbation,
                 "model_type": config.model_type,
                 "freeze_backbone": config.freeze_backbone,
@@ -946,9 +1091,8 @@ def train(config: TrainConfig):
     model = build_train_model(config).to(device)
 
     optimizer = torch.optim.AdamW(
-        filter(lambda p: p.requires_grad, model.parameters()),
-        lr=config.optim_config.lr,
-        weight_decay=config.optim_config.weight_decay,
+        build_optimizer_param_groups(model, config.optim_config),
+        betas=(0.9, 0.999),
     )
 
     criterion = ConsistencyLoss(
@@ -978,6 +1122,7 @@ def train(config: TrainConfig):
             val_dataloader=val_loader,
             optimizer=optimizer,
             criterion=criterion,
+            loss_config=config.loss_config,
             device=device,
             scaler=scaler,
             epoch=epoch,
