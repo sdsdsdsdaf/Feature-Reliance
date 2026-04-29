@@ -683,6 +683,7 @@ def train(config: TrainConfig):
 
     criterion = ConsistencyLoss(
         mode=config.loss_config.mode,
+        feature_loss_type=config.loss_config.feature_loss_type,
         lambda_kl=config.loss_config.lambda_kl,
         lambda_feat=config.loss_config.lambda_feat,
         temperature=config.loss_config.temperature,
@@ -690,6 +691,7 @@ def train(config: TrainConfig):
         normalize_feature=config.loss_config.normalize_feature,
         ce_clean_weight=config.loss_config.ce_clean_weight,
         ce_pert_weight=config.loss_config.ce_pert_weight,
+        eps=config.loss_config.eps,
     ).to(device)
     
     scaler = None

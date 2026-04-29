@@ -131,9 +131,14 @@ if __name__ == "__main__":
 
         loss_config=LossConfig(
             mode="feature",
+            feature_loss_type="cosine",
             lambda_feat=0.1,
             lambda_kl=0.1,
             temperature=2.0,
+            detach_teacher=True,
+            normalize_feature=True,
+            ce_clean_weight=1.0,
+            ce_pert_weight=1.0
         ),
 
         optim_config=OptimConfig(

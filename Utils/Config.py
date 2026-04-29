@@ -237,14 +237,16 @@ class ExperimentResult:
 # ------ Train Config ------
 @dataclass
 class LossConfig:
-    mode: Literal["kl", "feature", "both", "none"] = "feature"
-    lambda_kl: float = 0.1
-    lambda_feat: float = 0.1
-    temperature: float = 2.0
+    mode: str = "feature"  # "kl", "feature", "both", "none"
+    feature_loss_type: str = "consine" # "cosine", "mse", "mse_sum"
+    lambda_kl: float = 1.0
+    lambda_feat: float = 1.0
+    temperature: float = 1.0
     detach_teacher: bool = True
     normalize_feature: bool = True
     ce_clean_weight: float = 1.0
     ce_pert_weight: float = 1.0
+    eps=1e-12
     
 @dataclass
 class OptimConfig:
