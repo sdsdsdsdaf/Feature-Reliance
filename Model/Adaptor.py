@@ -54,6 +54,7 @@ class LinearAdaptor(nn.Module):
         use_trainable_scale=False,
         init_scale=1e-3,
         dropout=0.0,
+        safe_fp32_delta=True,
     ):
         super().__init__()
         hidden = max(dim // reduction, 1)
@@ -64,14 +65,21 @@ class LinearAdaptor(nn.Module):
         self.drop = nn.Dropout(dropout)
         self.up = nn.Linear(hidden, dim)
 
+        self.safe_fp32_delta = safe_fp32_delta
+
         if use_trainable_scale:
-            self.scale = nn.Parameter(torch.tensor(float(init_scale)))
+            self.scale = nn.Parameter(
+                torch.tensor(float(init_scale), dtype=torch.float32)
+            )
         else:
-            self.register_buffer("scale", torch.tensor(float(init_scale)))
+            self.register_buffer(
+                "scale",
+                torch.tensor(float(init_scale), dtype=torch.float32),
+            )
 
         self.last_delta = None
         self.last_delta_ratio = None
-        
+
         # Important: start as near-identity
         nn.init.zeros_(self.up.weight)
         nn.init.zeros_(self.up.bias)
@@ -83,16 +91,25 @@ class LinearAdaptor(nn.Module):
         z = self.drop(z)
         z = self.up(z)
 
-        adapted = self.scale * z
+        if self.safe_fp32_delta:
+            adapted = (self.scale.float() * z.float()).to(dtype=x.dtype)
+        else:
+            adapted = self.scale * z
 
         if self.training:
+            # Keep graph for delta regularization.
             self.last_delta = adapted
+
+            # Logging only. No graph.
             with torch.no_grad():
+                adapted_f = adapted.detach().float().reshape(adapted.shape[0], -1)
+                x_f = x.detach().float().reshape(x.shape[0], -1)
+
                 self.last_delta_ratio = (
-                    adapted.detach().reshape(adapted.shape[0], -1).norm(dim=1).mean()
-                    / (x.detach().reshape(x.shape[0], -1).norm(dim=1).mean() + 1e-8)
+                    adapted_f.norm(dim=1).mean()
+                    / (x_f.norm(dim=1).mean() + 1e-8)
                 )
-            
+
         return x + adapted
     
 class ConvAdaptor(nn.Module):
@@ -103,6 +120,7 @@ class ConvAdaptor(nn.Module):
         use_trainable_scale=True,
         init_scale=1e-3,
         dropout=0.0,
+        safe_fp32_delta=True,
     ):
         super().__init__()
         hidden = max(channels // reduction, 1)
@@ -112,10 +130,17 @@ class ConvAdaptor(nn.Module):
         self.drop = nn.Dropout2d(dropout)
         self.up = nn.Conv2d(hidden, channels, kernel_size=1)
 
+        self.safe_fp32_delta = safe_fp32_delta
+
         if use_trainable_scale:
-            self.scale = nn.Parameter(torch.tensor(float(init_scale)))
+            self.scale = nn.Parameter(
+                torch.tensor(float(init_scale), dtype=torch.float32)
+            )
         else:
-            self.register_buffer("scale", torch.tensor(float(init_scale)))
+            self.register_buffer(
+                "scale",
+                torch.tensor(float(init_scale), dtype=torch.float32),
+            )
 
         self.last_delta = None
         self.last_delta_ratio = None
@@ -129,14 +154,23 @@ class ConvAdaptor(nn.Module):
         z = self.drop(z)
         z = self.up(z)
 
-        adapted = self.scale * z
+        if self.safe_fp32_delta:
+            adapted = (self.scale.float() * z.float()).to(dtype=x.dtype)
+        else:
+            adapted = self.scale * z
 
         if self.training:
+            # Keep graph for delta regularization.
             self.last_delta = adapted
+
+            # Logging only. No graph.
             with torch.no_grad():
+                adapted_f = adapted.detach().float().reshape(adapted.shape[0], -1)
+                x_f = x.detach().float().reshape(x.shape[0], -1)
+
                 self.last_delta_ratio = (
-                    adapted.detach().reshape(adapted.shape[0], -1).norm(dim=1).mean()
-                    / (x.detach().reshape(x.shape[0], -1).norm(dim=1).mean() + 1e-8)
+                    adapted_f.norm(dim=1).mean()
+                    / (x_f.norm(dim=1).mean() + 1e-8)
                 )
 
         return x + adapted

@@ -474,7 +474,7 @@ def get_adaptor_delta_reg(model: nn.Module):
 
     for module in model.modules():
         if hasattr(module, "last_delta") and module.last_delta is not None:
-            regs.append(module.last_delta.pow(2).mean())
+            regs.append(module.last_delta.float().pow(2).mean())
 
     if not regs:
         device = next(model.parameters()).device
@@ -817,13 +817,13 @@ def train_one_epoch(
             logits_clean, feat_clean = model(x_clean, return_features=True)
             logits_pert, feat_pert = model(x_pert, return_features=True)
 
-            loss, loss_dict = criterion(
-                original_logits=logits_clean,
-                perturbed_logits=logits_pert,
-                labels=y,
-                original_features=feat_clean,
-                perturbed_features=feat_pert,
-            )
+        loss, loss_dict = criterion(
+            original_logits=logits_clean.float(),
+            perturbed_logits=logits_pert.float(),
+            labels=y,
+            original_features=feat_clean.float(),
+            perturbed_features=feat_pert.float(),
+        )
 
         scale_reg = get_adaptor_scale_reg(model)
         delta_reg = get_adaptor_delta_reg(model)
@@ -946,13 +946,13 @@ def train_one_epoch(
                     logits_clean, feat_clean = model(x_clean, return_features=True)
                     logits_pert, feat_pert = model(x_pert, return_features=True)
 
-                    loss, loss_dict = criterion(
-                        original_logits=logits_clean,
-                        perturbed_logits=logits_pert,
-                        labels=y,
-                        original_features=feat_clean,
-                        perturbed_features=feat_pert,
-                    )
+                loss, loss_dict = criterion(
+                    original_logits=logits_clean.float(),
+                    perturbed_logits=logits_pert.float(),
+                    labels=y,
+                    original_features=feat_clean.float(),
+                    perturbed_features=feat_pert.float(),
+                )
 
                 assert_finite(
                     stage="val",
