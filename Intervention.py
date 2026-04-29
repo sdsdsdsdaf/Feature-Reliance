@@ -159,7 +159,7 @@ if __name__ == "__main__":
         adpator_config = AdaptorConfig(
             reduction=16,
             use_norm=True,
-            use_trainable_scale=False,
+            use_trainable_scale=True,
             init_scale=1e-3,
             target_layers="last1"
         )
