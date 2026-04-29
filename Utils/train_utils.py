@@ -644,6 +644,15 @@ def build_train_val_dataloaders(config: TrainConfig):
     hparams = config.transform_hparams
     class_ids = CLASS_MAPPING_REGISTRY[config.class_map_name]["subset_class_ids"]
     
+    train_kwargs = {}
+    val_kwargs = {}
+
+    if data_config.num_workers > 0:
+        train_kwargs["persistent_workers"] = True
+        train_kwargs["prefetch_factor"] = 2
+        val_kwargs["persistent_workers"] = True
+        val_kwargs["prefetch_factor"] = 2
+    
     train_dataset_spec = config.train_dataset_spec
     val_dataset_spec = config.val_dataset_spec
     
@@ -676,8 +685,9 @@ def build_train_val_dataloaders(config: TrainConfig):
         batch_size=data_config.batch_size,
         shuffle=data_config.shuffle,
         num_workers=data_config.num_workers,
-        pin_memory=data_config.pin_memory,
+        pin_memory=False,
         drop_last=True,
+        **train_kwargs,
     )
     
     val_loader = None
@@ -694,8 +704,9 @@ def build_train_val_dataloaders(config: TrainConfig):
             batch_size=data_config.batch_size,
             shuffle=False,
             num_workers=data_config.num_workers,
-            pin_memory=data_config.pin_memory,
+            pin_memory=False,
             drop_last=False,
+            **val_kwargs,
         )
 
     return train_loader, val_loader
