@@ -114,11 +114,15 @@ def get_module_param_ids(modules):
 
 def get_adaptor_modules(model: nn.Module):
     """
-    Find adaptor modules.
+    Find actual adaptor modules only.
 
-    This checks both:
-    1. module class name: LinearAdaptor, ConvAdaptor
-    2. module path name containing adaptor/adapter
+    This avoids counting child modules such as:
+    - layer4.adaptor.down
+    - layer4.adaptor.act
+    - layer4.adaptor.up
+
+    Expected:
+    - layer4.adaptor -> ConvAdaptor
     """
     adaptor_class_names = {
         "LinearAdaptor",
@@ -128,20 +132,22 @@ def get_adaptor_modules(model: nn.Module):
     adaptor_modules = []
 
     for name, module in model.named_modules():
+        if name == "":
+            continue
+
         name_lower = name.lower()
+        last_name = name_lower.split(".")[-1]
         class_name = module.__class__.__name__
 
         is_adaptor_module = (
             class_name in adaptor_class_names
-            or "adaptor" in name_lower
-            or "adapter" in name_lower
+            or last_name in {"adaptor", "adapter"}
         )
 
         if is_adaptor_module:
             adaptor_modules.append(module)
 
     return adaptor_modules
-
 
 def get_head_modules(model: nn.Module):
     """
