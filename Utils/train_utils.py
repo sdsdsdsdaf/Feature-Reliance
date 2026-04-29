@@ -50,6 +50,170 @@ except ImportError:
     from Model.Loss import ConsistencyLoss
     from Model.model import UnifiedModel
     from Model.Adaptor import inject_adaptors
+    
+from collections import defaultdict
+import torch.nn as nn
+
+
+def count_params(module: nn.Module, trainable_only: bool = False) -> int:
+    """
+    Count parameters in a module.
+    """
+    params = module.parameters()
+
+    if trainable_only:
+        return sum(p.numel() for p in params if p.requires_grad)
+
+    return sum(p.numel() for p in params)
+
+
+def count_unique_params_from_modules(modules):
+    """
+    Count unique parameters from a list of modules.
+    Avoid double-counting shared parameters.
+    """
+    seen = set()
+    total = 0
+    trainable = 0
+
+    for module in modules:
+        for p in module.parameters():
+            pid = id(p)
+
+            if pid in seen:
+                continue
+
+            seen.add(pid)
+            total += p.numel()
+
+            if p.requires_grad:
+                trainable += p.numel()
+
+    return total, trainable
+
+
+def get_adaptor_modules(model: nn.Module):
+    """
+    Find adaptor modules by class name.
+    """
+    adaptor_class_names = {"LinearAdaptor", "ConvAdaptor"}
+
+    return [
+        module
+        for module in model.modules()
+        if module.__class__.__name__ in adaptor_class_names
+    ]
+
+
+def get_head_modules(model: nn.Module):
+    """
+    Find likely head modules from common attribute names.
+    """
+    head_modules = []
+
+    candidate_attrs = [
+        "head",
+        "heads",
+        "classifier",
+        "classifiers",
+        "fc",
+    ]
+
+    for attr in candidate_attrs:
+        if hasattr(model, attr):
+            module = getattr(model, attr)
+
+            if isinstance(module, nn.Module):
+                head_modules.append(module)
+
+    return head_modules
+
+
+def print_model_param_summary(model: nn.Module):
+    """
+    Print clean parameter summary.
+    """
+
+    total_params = count_params(model, trainable_only=False)
+    trainable_params = count_params(model, trainable_only=True)
+    frozen_params = total_params - trainable_params
+
+    adaptor_modules = get_adaptor_modules(model)
+    head_modules = get_head_modules(model)
+
+    adaptor_total, adaptor_trainable = count_unique_params_from_modules(adaptor_modules)
+    head_total, head_trainable = count_unique_params_from_modules(head_modules)
+
+    other_total = total_params - adaptor_total - head_total
+    other_trainable = trainable_params - adaptor_trainable - head_trainable
+
+    rows = [
+        ("Total Model", total_params, trainable_params),
+        ("Head", head_total, head_trainable),
+        ("Adaptor", adaptor_total, adaptor_trainable),
+        ("Other / Backbone", other_total, other_trainable),
+        ("Frozen Params", frozen_params, 0),
+    ]
+
+    print("\n" + "=" * 80)
+    print("Model Parameter Summary")
+    print("=" * 80)
+    print(f"{'Module':<20} {'Total Params':>18} {'Trainable Params':>20} {'Trainable %':>14}")
+    print("-" * 80)
+
+    for name, total, trainable in rows:
+        ratio = (trainable / total * 100) if total > 0 else 0.0
+
+        print(
+            f"{name:<20} "
+            f"{total:>18,} "
+            f"{trainable:>20,} "
+            f"{ratio:>13.2f}%"
+        )
+
+    print("-" * 80)
+    print(f"Number of adaptor modules: {len(adaptor_modules)}")
+    print(f"Number of head modules:    {len(head_modules)}")
+    print("=" * 80 + "\n")
+    
+def collect_adaptor_summary_metrics(model: nn.Module, prefix: str = "step/adaptor_summary"):
+    grad_norms = []
+    weight_norms = []
+    scale_values = []
+
+    for module in model.modules():
+        if module.__class__.__name__ not in ["LinearAdaptor", "ConvAdaptor"]:
+            continue
+
+        for name, p in module.named_parameters():
+            if "weight" in name:
+                weight_norms.append(p.detach().norm())
+
+            if p.grad is not None:
+                grad_norms.append(p.grad.detach().norm())
+
+        if hasattr(module, "scale") and isinstance(module.scale, nn.Parameter):
+            scale_values.append(module.scale.detach().mean())
+
+    metrics = {}
+
+    if grad_norms:
+        grad_norms = torch.stack(grad_norms)
+        metrics[f"{prefix}/grad_norm_mean"] = grad_norms.mean().item()
+        metrics[f"{prefix}/grad_norm_max"] = grad_norms.max().item()
+
+    if weight_norms:
+        weight_norms = torch.stack(weight_norms)
+        metrics[f"{prefix}/weight_norm_mean"] = weight_norms.mean().item()
+        metrics[f"{prefix}/weight_norm_max"] = weight_norms.max().item()
+
+    if scale_values:
+        scale_values = torch.stack(scale_values)
+        metrics[f"{prefix}/scale_mean"] = scale_values.mean().item()
+        metrics[f"{prefix}/scale_max"] = scale_values.max().item()
+        metrics[f"{prefix}/scale_min"] = scale_values.min().item()
+
+    return metrics
 
 def set_trainable_params(model:nn.Module, freeze_backbone: bool = True, freeze_linear_head: bool = True):
     if not freeze_backbone:
@@ -154,6 +318,7 @@ def build_train_model(config: TrainConfig):
     
 
     model_spec = config.model_spec
+    adaptor_config = config.adpator_config
     timm_model_name_map = {
         ("vit-b", "augreg_in1k"): "vit_base_patch16_224.augreg_in1k",
     }
@@ -175,6 +340,11 @@ def build_train_model(config: TrainConfig):
         backbone = inject_adaptors(
             backbone,
             model_spec.model_name,
+            target=adaptor_config.target_layers,
+            reduction=adaptor_config.reduction,
+            use_norm=adaptor_config.use_norm,
+            use_trainable_scale=adaptor_config.use_trainable_scale,
+            init_scale=adaptor_config.init_scale
         )
 
     elif config.model_type == "hf_dinov2_cls":
@@ -190,6 +360,11 @@ def build_train_model(config: TrainConfig):
         backbone = inject_adaptors(
             backbone,
             model_spec.model_name,
+            target=adaptor_config.target_layers,
+            reduction=adaptor_config.reduction,
+            use_norm=adaptor_config.use_norm,
+            use_trainable_scale=adaptor_config.use_trainable_scale,
+            init_scale=adaptor_config.init_scale,
         )
 
     else:
@@ -205,6 +380,11 @@ def build_train_model(config: TrainConfig):
         freeze_backbone=config.freeze_backbone,
         freeze_linear_head=config.freeze_linear_head,
     )
+    
+    if config.verbose_model:
+        print(model)
+        print_model_param_summary(model)
+    
 
     return model
     
@@ -300,6 +480,7 @@ def train_one_epoch(
         train_ce_clean += loss_dict["loss_ce_clean"].item()
         train_ce_pert += loss_dict["loss_ce_pert"].item()
         train_cons += loss_dict["loss_consistency"].item()
+        adaptor_metrics = collect_adaptor_summary_metrics(model)
 
         step_metrics = {
             "step/train_loss": loss.item(),
@@ -310,6 +491,7 @@ def train_one_epoch(
             "step/train_acc_pert": pert_correct / batch_total,
             "epoch": epoch + 1,
         }
+        step_metrics.update(adaptor_metrics)
 
         if use_wandb:
             import wandb
@@ -540,4 +722,3 @@ def train(config: TrainConfig):
         wandb.finish()
 
     return model, history
-

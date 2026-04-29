@@ -259,11 +259,20 @@ class LoggingConfig:
     project_name: str = "feature-reliance"
     run_name: Optional[str] = None
     verbose_epoch: int = 1
+    
+@dataclass
+class AdaptorConfig:
+    reduction: int = 16 
+    use_norm: bool = False 
+    use_trainable_scale: bool = False
+    init_scale: float = 1e-3
+    target_layers: str|int|List[str]|List[int] ="last1"
 
 @dataclass
 class TrainConfig:
     seed: int = 42
     device: str = "cuda"
+    verbose_model: bool = False
 
     # 기존 Config 재사용
     model_spec: ModelSpec = None
@@ -284,6 +293,7 @@ class TrainConfig:
     loss_config: LossConfig = None
     optim_config: OptimConfig = None
     logging_config: LoggingConfig = None
+    adpator_config: AdaptorConfig = None
 
     def __post_init__(self):
         if self.loss_config is None:
@@ -294,3 +304,6 @@ class TrainConfig:
 
         if self.logging_config is None:
             self.logging_config = LoggingConfig()  
+            
+        if self.adpator_config is None:
+            self.adpator_config = AdaptorConfig()
