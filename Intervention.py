@@ -1,10 +1,10 @@
 import warnings
 
 warnings.filterwarnings(
-        "ignore",
-        message=r".*Metadata Warning, tag 274 had too many entries.*",
-        category=UserWarning,
-    )
+    "ignore",
+    message=r".*Metadata Warning, tag 274 had too many entries.*",
+    category=UserWarning,
+)
 
 
 """
@@ -134,7 +134,7 @@ if __name__ == "__main__":
         loss_config=LossConfig(
             mode="feature",
             feature_loss_type="cosine",
-            lambda_feat=0.1,
+            lambda_feat=1.0,
             lambda_kl=0.1,
             temperature=2.0,
             detach_teacher=True,
