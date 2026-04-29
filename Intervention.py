@@ -1,4 +1,6 @@
 import warnings
+import os
+os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 warnings.filterwarnings(
     "ignore",
@@ -101,7 +103,7 @@ if __name__ == "__main__":
     )
 
     data_config = DataConfig(
-        batch_size=128,
+        batch_size=256,
         num_workers=4,
         pin_memory=False,
         shuffle=True,
@@ -136,12 +138,12 @@ if __name__ == "__main__":
             feature_loss_type="cosine",
             lambda_feat=1.0,
             lambda_kl=0.1,
-            lambda_scale=1e-3,
-            lambda_delta=0.0,
+            lambda_scale=1e-2,
+            lambda_delta=1e-1,
             temperature=2.0,
             detach_teacher=True,
             normalize_feature=True,
-            ce_clean_weight=1.0,
+            ce_clean_weight=0.3,
             ce_pert_weight=1.0
         ),
 
@@ -149,12 +151,12 @@ if __name__ == "__main__":
             epochs=5,
             lr=1e-4,
             weight_decay=1e-4,
-            use_amp=False,
+            use_amp=True,
         ),
 
         logging_config=LoggingConfig(
             use_wandb=True,
-            run_name="resnet50_localwarp_feature",
+            run_name="resnet50_localwarp_feature_ce_clean=0.3",
             verbose_epoch=1,
         ),
         

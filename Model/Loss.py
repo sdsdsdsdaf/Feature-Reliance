@@ -35,7 +35,7 @@ class ConsistencyLoss(nn.Module):
         self.ce_clean_weight = ce_clean_weight
         self.ce_pert_weight = ce_pert_weight
 
-    def kl_consistency(self, original_logits, perturbed_logits):
+    def kl_consistency(self, original_logits:Tensor, perturbed_logits:Tensor):
         T = self.temperature
         teacher_logits = original_logits.detach() if self.detach_teacher else original_logits
         log_p_perturbed = F.log_softmax(perturbed_logits / T, dim=1)
