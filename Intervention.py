@@ -17,7 +17,7 @@ D. ours-both
 
 import torch
 
-from Utils.Config import DataConfig, DatasetSpec, LoggingConfig, LossConfig, ModelSpec, OptimConfig, TrainConfig, TransformHyperParams
+from Utils.Config import DataConfig, DatasetSpec, LoggingConfig, LossConfig, ModelSpec, OptimConfig, TrainConfig, TransformHyperParams, AdaptorConfig
 from Utils.Dataset import ImageNetValFlatDataset, build_sample_indices_from_targets
 from Utils.train_utils import train
 from Utils.utils import IMAGENET_R_CLASS_IDS
@@ -109,6 +109,8 @@ if __name__ == "__main__":
             val_dataset_spec,
         ],
     )
+    
+    
 
     train_config = TrainConfig(
         seed=42,
@@ -146,6 +148,14 @@ if __name__ == "__main__":
             run_name="resnet50_localwarp_feature",
             verbose_epoch=1,
         ),
+        
+        adpator_config = AdaptorConfig(
+            reduction=16,
+            use_norm=True,
+            use_trainable_scale=False,
+            init_scale=1e-3,
+            target_layers="last1"
+        )
     )
         
         
