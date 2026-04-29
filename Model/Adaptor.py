@@ -54,7 +54,7 @@ class LinearAdaptor(nn.Module):
         self.down = nn.Linear(dim, hidden)
         self.act = nn.GELU()
         self.up = nn.Linear(hidden, dim)
-        self.scale = nn.Parameter(torch.ones(1)*init_scale) if use_trainable_scale else 1
+        self.scale = nn.Parameter(torch.ones(1)*init_scale) if use_trainable_scale else init_scale
         
         # Important: start as near-identity
         nn.init.zeros_(self.up.weight)
@@ -62,8 +62,7 @@ class LinearAdaptor(nn.Module):
 
     def forward(self, x):
         adapted = self.up(self.act(self.down(self.norm(x))))
-        if self.scale is not None:
-            adapted = self.scale * adapted
+        adapted = self.scale * adapted
             
         return x + adapted
     
@@ -86,8 +85,7 @@ class ConvAdaptor(nn.Module):
 
     def forward(self, x):
         adapted = self.up(self.act(self.down(x)))
-        if self.scale is not None:
-            adapted = self.scale * adapted
+        adapted = self.scale * adapted
         return x + adapted
     
 class ConvBlockWithAdaptor(nn.Module):
@@ -163,7 +161,7 @@ def inject_resnet_adaptors(
                 channels[layer_name], 
                 reduction=reduction, 
                 use_trainable_scale=use_trainable_scale,
-                init_scale=init_scale
+                init_scale=init_scale,
             )
         )
 
@@ -175,7 +173,7 @@ def inject_timm_vit_adaptors(
     reduction=16,
     use_norm=False,
     use_trainable_scale=False,
-    init_scale=1e-3
+    init_scale=1e-3,
 ):
     num_blocks = len(model.blocks)
     dim = model.embed_dim
@@ -195,7 +193,7 @@ def inject_timm_vit_adaptors(
         "reduction": reduction,
         "use_norm": use_norm,
         "use_trainable_scale": use_trainable_scale,
-        "init_scale": init_scale
+        "init_scale": init_scale,
     }
     
     for idx in indices:
@@ -210,7 +208,7 @@ def inject_hf_dino_adaptors(
     reduction=16,
     use_norm=False,
     use_trainable_scale=False,
-    init_scale=1e-3
+    init_scale=1e-3,
 ):
     num_layers = len(model.dinov2.encoder.layer)
     dim = model.config.hidden_size
@@ -230,7 +228,7 @@ def inject_hf_dino_adaptors(
         "reduction": reduction,
         "use_norm": use_norm,
         "use_trainable_scale": use_trainable_scale,
-        "init_scale": init_scale
+        "init_scale": init_scale,
     }
     
     for idx in indices:
@@ -246,7 +244,7 @@ def inject_adaptors(
     reduction=16,
     use_norm=False,
     use_trainable_scale=False,
-    init_scale=1e-3
+    init_scale=1e-3,
 ):
     model_type = model_type.lower()
 
@@ -256,27 +254,27 @@ def inject_adaptors(
             target_layers=target if isinstance(target, (list, tuple)) else (target,),
             reduction=reduction,
             use_trainable_scale=use_trainable_scale,
-            init_scale=init_scale
+            init_scale=init_scale,
         )
         
-    elif model_type in ["hf_dino", "hf_dinov2_cls", "dinov2_vit-b", "dinov2_vit_b", "dinov2_b14", "dino"]:
+    elif model_type in ["hf_dino", "dinov2", "dinov2_b14", "dino"]:
         return inject_hf_dino_adaptors(
             model=model,
             target_layers=target,
             reduction=reduction,
             use_norm=use_norm,
             use_trainable_scale=use_trainable_scale,
-            init_scale=init_scale
+            init_scale=init_scale,
         )
 
-    elif model_type in ["timm_vit", "vit", "vit-b", "vit_b16", "vit-b/16"]:
+    elif model_type in ["timm_vit", "vit", "vit_b16", "vit-b/16", "vit-b"]:
         return inject_timm_vit_adaptors(
             model=model,
             target_blocks=target,
             reduction=reduction,
             use_norm=use_norm,
             use_trainable_scale=use_trainable_scale,
-            init_scale=init_scale
+            init_scale=init_scale,
         )
 
     else:
