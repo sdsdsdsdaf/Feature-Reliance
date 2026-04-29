@@ -1,3 +1,12 @@
+import warnings
+
+warnings.filterwarnings(
+        "ignore",
+        message=r".*Metadata Warning, tag 274 had too many entries.*",
+        category=UserWarning,
+    )
+
+
 """
 A. clean only
    CE(clean)
@@ -22,14 +31,6 @@ from Utils.Dataset import ImageNetValFlatDataset, build_sample_indices_from_targ
 from Utils.train_utils import train
 from Utils.utils import IMAGENET_R_CLASS_IDS
 import timm
-
-import warnings
-
-warnings.filterwarnings(
-    "ignore",
-    message="Corrupt EXIF data.*",
-    category=UserWarning,
-)
 
 if __name__ == "__main__":
     
