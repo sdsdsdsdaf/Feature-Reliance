@@ -291,7 +291,7 @@ def build_train_val_dataloaders(config: TrainConfig):
         shuffle=data_config.shuffle,
         num_workers=data_config.num_workers,
         pin_memory=data_config.pin_memory,
-        drop_last=False,
+        drop_last=True,
     )
     
     val_loader = None
