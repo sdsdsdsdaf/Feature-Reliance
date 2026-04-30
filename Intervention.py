@@ -178,7 +178,7 @@ if __name__ == "__main__":
 
         loss_config=LossConfig(
             mode="feature",
-            feature_loss_type="cosine",
+            feature_loss_type="mse_sum",
             lambda_feat=1.0,
             lambda_kl=0.1,
             lambda_scale=1e-2,
@@ -186,7 +186,7 @@ if __name__ == "__main__":
             temperature=2.0,
             detach_teacher=True,
             normalize_feature=True,
-            ce_clean_weight=0.5,
+            ce_clean_weight=1.0,
             ce_pert_weight=1.0,
         ),
 
