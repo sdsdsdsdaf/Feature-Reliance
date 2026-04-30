@@ -130,19 +130,36 @@ class ConsistencyLoss(nn.Module):
     
     def forward(
         self,
-        original_logits,
-        perturbed_logits,
-        labels,
-        original_features=None,
+        clean_logits=None,
+        perturbed_logits=None,
+        labels=None,
+        clean_features=None,
         perturbed_features=None,
+        anchor_logits=None,
+        anchor_features=None,
+        original_logits=None,
+        original_features=None,
     ):
-        ce_clean = F.cross_entropy(original_logits, labels)
+        if clean_logits is None:
+            clean_logits = original_logits
+        if clean_features is None:
+            clean_features = original_features
+        if anchor_logits is None:
+            anchor_logits = clean_logits
+        if anchor_features is None:
+            anchor_features = clean_features
+
+        assert clean_logits is not None
+        assert perturbed_logits is not None
+        assert labels is not None
+
+        ce_clean = F.cross_entropy(clean_logits, labels)
         ce_pert = F.cross_entropy(perturbed_logits, labels)
 
         loss_consistency = self.consistency_loss(
-            original_logits=original_logits,
+            original_logits=anchor_logits,
             perturbed_logits=perturbed_logits,
-            original_features=original_features,
+            original_features=anchor_features,
             perturbed_features=perturbed_features,
         )
 
