@@ -20,6 +20,42 @@ class ConsistencyLoss(nn.Module):
         eps=1e-12,
     ):
         
+        """
+        Loss module for clean/perturbed consistency training.
+
+        This loss combines:
+        - Clean image classification loss
+        - Perturbed image classification loss
+        - Perturbed feature/logit consistency with anchor features/logits
+        - Optional clean feature preservation against anchor features
+
+        Args:
+            mode (str): Type of consistency loss to use.
+                Options:
+                - "kl": Use KL divergence between anchor logits and perturbed logits.
+                - "feature": Use feature consistency loss.
+                - "both": Use both KL and feature consistency.
+                - "none": Disable consistency loss.
+            feature_loss_type (str): Type of feature consistency loss.
+                Options:
+                - "cosine": 1 - cosine similarity.
+                - "mse": Mean squared error over all feature elements.
+                - "mse_sum": Per-sample squared L2 distance, then batch mean.
+            lambda_kl (float): Weight for KL consistency loss.
+            lambda_feat (float): Weight for perturbed feature consistency loss.
+            lambda_clean_preserve (float): Weight for clean feature preservation loss.
+            temperature (float): Temperature used for KL distillation.
+            detach_teacher (bool): If True, detach teacher logits/features from the graph.
+            normalize_feature (bool): If True, L2-normalize features before feature loss.
+            ce_clean_weight (float): Weight for clean classification loss.
+            ce_pert_weight (float): Weight for perturbed classification loss.
+            eps (float): Small value for numerical stability.
+
+        Returns:
+            None
+        """
+
+        
         super().__init__()
         assert mode in ["kl", "feature", "both", "none"]
         assert feature_loss_type in ["cosine", "mse", "mse_sum"]

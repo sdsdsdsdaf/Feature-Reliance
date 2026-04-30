@@ -180,8 +180,9 @@ if __name__ == "__main__":
         loss_config=LossConfig(
             mode="feature",
             feature_loss_type="mse_sum",
-            lambda_feat=1.0,
+            lambda_feat=0.3,
             lambda_kl=0.1,
+            lambda_clean_preserve=1.0,
             lambda_scale=1e-2,
             lambda_delta=1.0,
             temperature=2.0,
