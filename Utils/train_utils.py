@@ -500,6 +500,28 @@ def collect_adaptor_delta_ratios(model: nn.Module, prefix: str = "step/adaptor_d
     }
 
 
+def collect_feature_delta_metrics(
+    base_features: Tensor,
+    student_features: Tensor,
+    prefix: str,
+    eps: float = 1e-8,
+):
+    base_features = base_features.detach().float()
+    student_features = student_features.detach().float()
+    delta = student_features - base_features
+
+    delta_norm = delta.norm(dim=-1).mean()
+    base_norm = base_features.norm(dim=-1).mean()
+    student_norm = student_features.norm(dim=-1).mean()
+
+    return {
+        f"{prefix}/delta_norm": delta_norm.item(),
+        f"{prefix}/base_norm": base_norm.item(),
+        f"{prefix}/student_norm": student_norm.item(),
+        f"{prefix}/delta_ratio": (delta_norm / (base_norm + eps)).item(),
+    }
+
+
 def build_optimizer_param_groups(model: nn.Module, optim_config: OptimConfig):
     adaptor_modules = get_adaptor_modules(model)
     head_modules = get_head_modules(model)
@@ -973,6 +995,35 @@ def train_one_epoch(
 
         if use_wandb:
             import wandb
+            if anchor_model is not None:
+                with torch.no_grad():
+                    with autocast(device_type=device_type, enabled=use_amp):
+                        _, anchor_pert_feat = anchor_model(
+                            x_pert,
+                            return_features=True,
+                        )
+
+                clean_delta_metrics = collect_feature_delta_metrics(
+                    base_features=anchor_feat,
+                    student_features=feat_clean,
+                    prefix="adaptor_delta/clean",
+                    eps=loss_config.eps,
+                )
+                pert_delta_metrics = collect_feature_delta_metrics(
+                    base_features=anchor_pert_feat,
+                    student_features=feat_pert,
+                    prefix="adaptor_delta/pert",
+                    eps=loss_config.eps,
+                )
+                step_metrics.update(clean_delta_metrics)
+                step_metrics.update(pert_delta_metrics)
+
+                clean_ratio = clean_delta_metrics["adaptor_delta/clean/delta_ratio"]
+                pert_ratio = pert_delta_metrics["adaptor_delta/pert/delta_ratio"]
+                step_metrics["adaptor_delta/pert_over_clean"] = (
+                    pert_ratio / (clean_ratio + loss_config.eps)
+                )
+
             wandb.log(step_metrics, step=global_step)
 
         global_step += 1
