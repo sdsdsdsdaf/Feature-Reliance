@@ -21,6 +21,8 @@ warnings.filterwarnings(
 )
 
 
+
+
 """
 A. clean only
    CE(clean)
@@ -89,30 +91,59 @@ if __name__ == "__main__":
     )
 
 
-    train_dataset_spec = DatasetSpec(
-        name="imagenet_train_200",
-        dataset_type="hf_imagenet_train_subset",
-        root="Data/ILSVRC2012/train",
-        split="train",
-        num_classes=1000,
-        labels_map=IMAGENET_R_CLASS_IDS,
-        class_map_name="imagenet_r_subset_map",
-        domain_type="id",
-        id_dataset_name="imagenet_train_200",
-    )
+    DATA_SCOPE = "full"  # "full" or "subset"
 
-    val_dataset_spec = DatasetSpec(
-        name="imagenet_200",
-        dataset_type="imagenet_val_subset",
-        root="Data",
-        split="val",
-        num_classes=1000,
-        domain_type="id",
-        class_map_name="imagenet_r_subset_map",
-        sample_indices=imagenet_200_indices,
-        labels_map=IMAGENET_R_CLASS_IDS,
-        id_dataset_name="imagenet_200"
-    )
+    if DATA_SCOPE == "subset":
+        train_dataset_spec = DatasetSpec(
+            name="imagenet_train_200",
+            dataset_type="hf_imagenet_train_subset",
+            root="Data/ILSVRC2012/train",
+            split="train",
+            num_classes=1000,
+            labels_map=IMAGENET_R_CLASS_IDS,
+            class_map_name="imagenet_r_subset_map",
+            domain_type="id",
+            id_dataset_name="imagenet_train_200",
+        )
+
+        val_dataset_spec = DatasetSpec(
+            name="imagenet_200",
+            dataset_type="imagenet_val_subset",
+            root="Data",
+            split="val",
+            num_classes=200,
+            domain_type="id",
+            class_map_name="imagenet_r_subset_map",
+            sample_indices=imagenet_200_indices,
+            labels_map=IMAGENET_R_CLASS_IDS,
+            id_dataset_name="imagenet_200",
+        )
+
+    elif DATA_SCOPE == "full":
+        train_dataset_spec = DatasetSpec(
+            name="imagenet_train",
+            dataset_type="hf_imagenet_train_subset",
+            root="Data/ILSVRC2012/train",
+            split="train",
+            num_classes=1000,
+            labels_map=list(range(1000)),
+            domain_type="id",
+            id_dataset_name="imagenet",
+        )
+
+        val_dataset_spec = DatasetSpec(
+            name="imagenet",
+            dataset_type="imagenet_val_flat",
+            root="Data",
+            split="val",
+            num_classes=1000,
+            domain_type="id",
+            id_dataset_name="imagenet",
+        )
+
+    else:
+        raise ValueError(f"Unknown DATA_SCOPE: {DATA_SCOPE}")
+
 
     data_config = DataConfig(
         batch_size=256,

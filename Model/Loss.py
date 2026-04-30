@@ -8,7 +8,7 @@ class ConsistencyLoss(nn.Module):
     def __init__(
         self,
         mode: str = "feature",  # "kl", "feature", "both", "none"
-        feature_loss_type: str = "consine",
+        feature_loss_type: str = "cosine",
         lambda_kl: float = 1.0,
         lambda_feat: float = 1.0,
         temperature: float = 1.0,
