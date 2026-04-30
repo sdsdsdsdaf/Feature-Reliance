@@ -855,7 +855,7 @@ def train_one_epoch(
     val_dataloader,
     optimizer,
     criterion,
-    loss_config,
+    loss_config:LossConfig,
     device,
     scaler=None,
     epoch: int = 0,
@@ -989,7 +989,14 @@ def train_one_epoch(
             "step/train_acc_clean": clean_correct / batch_total,
             "step/train_acc_pert": pert_correct / batch_total,
             "epoch": epoch + 1,
+            
         }
+        step_metrics["loss_weighted/scale_reg"] = loss_config.lambda_scale * scale_reg.item()
+        step_metrics["loss_weighted/delta_reg"] = loss_config.lambda_delta * delta_reg.item()
+        step_metrics["loss_weighted/reg_total"] = (
+            loss_config.lambda_scale * scale_reg.item()
+            + loss_config.lambda_delta * delta_reg.item()
+        )
         step_metrics.update(adaptor_metrics)
         step_metrics.update(adaptor_delta_metrics)
 
