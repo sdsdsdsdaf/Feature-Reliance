@@ -232,7 +232,7 @@ if __name__ == "__main__":
     )
 
     extraction_config = ExtractionConfig(
-        root_dir="Cache/Intervention/localwarp",
+        root_dir="Cache",
         device="cuda:0" if torch.cuda.is_available() else "cpu",
         dtype="float16",
         overwrite=False,
@@ -303,8 +303,8 @@ if __name__ == "__main__":
                 "patchrotation",
                 "localwarp",
             ],
-            verbose_image=True,
-            run_validation=True,
+            verbose_image=False,
+            run_validation=False,
             validation_max_samples=None,
             max_workers=5,
         )
