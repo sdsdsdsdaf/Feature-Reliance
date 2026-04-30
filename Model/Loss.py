@@ -11,6 +11,7 @@ class ConsistencyLoss(nn.Module):
         feature_loss_type: str = "cosine",
         lambda_kl: float = 1.0,
         lambda_feat: float = 1.0,
+        lambda_clean_preserve: float = 0.0,
         temperature: float = 1.0,
         detach_teacher: bool = True,
         normalize_feature: bool = True,
@@ -29,6 +30,7 @@ class ConsistencyLoss(nn.Module):
 
         self.lambda_kl = lambda_kl
         self.lambda_feat = lambda_feat
+        self.lambda_clean_preserve = lambda_clean_preserve
         self.temperature = temperature
         self.detach_teacher = detach_teacher
         self.normalize_feature = normalize_feature
@@ -163,10 +165,31 @@ class ConsistencyLoss(nn.Module):
             perturbed_features=perturbed_features,
         )
 
+        if (
+            self.lambda_clean_preserve > 0
+            and anchor_features is not None
+            and clean_features is not None
+        ):
+            loss_clean_preserve = self.feature_consistency(
+                original_features=anchor_features,
+                perturbed_features=clean_features,
+            )
+        else:
+            loss_clean_preserve = torch.zeros(
+                (),
+                device=self._get_device(
+                    clean_logits,
+                    perturbed_logits,
+                    anchor_features,
+                    clean_features,
+                ),
+            )
+
         total_loss = (
             self.ce_clean_weight * ce_clean
             + self.ce_pert_weight * ce_pert
             + loss_consistency
+            + self.lambda_clean_preserve * loss_clean_preserve
         )
 
         loss_dict = {
@@ -174,6 +197,10 @@ class ConsistencyLoss(nn.Module):
             "loss_ce_clean": ce_clean.detach(),
             "loss_ce_pert": ce_pert.detach(),
             "loss_consistency": loss_consistency.detach(),
+            "loss_clean_preserve": loss_clean_preserve.detach(),
+            "loss_clean_preserve_weighted": (
+                self.lambda_clean_preserve * loss_clean_preserve
+            ).detach(),
         }
 
         return total_loss, loss_dict
