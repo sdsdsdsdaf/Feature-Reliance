@@ -875,6 +875,7 @@ def train_one_epoch(
     train_ce_clean = 0.0
     train_ce_pert = 0.0
     train_cons = 0.0
+    train_clean_preserve = 0.0
     train_scale_reg = 0.0
     train_delta_reg = 0.0
 
@@ -972,6 +973,7 @@ def train_one_epoch(
         train_ce_clean += loss_dict["loss_ce_clean"].item()
         train_ce_pert += loss_dict["loss_ce_pert"].item()
         train_cons += loss_dict["loss_consistency"].item()
+        train_clean_preserve += loss_dict["loss_clean_preserve"].item()
         train_scale_reg += scale_reg.item()
         train_delta_reg += delta_reg.item()
         adaptor_metrics = collect_adaptor_summary_metrics(model)
@@ -982,6 +984,15 @@ def train_one_epoch(
             "step/train_ce_clean": loss_dict["loss_ce_clean"].item(),
             "step/train_ce_pert": loss_dict["loss_ce_pert"].item(),
             "step/train_consistency": loss_dict["loss_consistency"].item(),
+            "step/train_clean_preserve": loss_dict["loss_clean_preserve"].item(),
+            "step/train_clean_preserve_weighted": loss_dict[
+                "loss_clean_preserve_weighted"
+            ].item(),
+            "loss_weight/lambda_clean_preserve": getattr(
+                loss_config,
+                "lambda_clean_preserve",
+                0.0,
+            ),
             "reg/scale_reg": scale_reg.item(),
             "reg/delta_reg": delta_reg.item(),
             "reg/lambda_scale": loss_config.lambda_scale,
@@ -1042,6 +1053,12 @@ def train_one_epoch(
         "train/ce_clean": train_ce_clean / n_train,
         "train/ce_pert": train_ce_pert / n_train,
         "train/consistency": train_cons / n_train,
+        "train/clean_preserve": train_clean_preserve / n_train,
+        "train/clean_preserve_weighted": (
+            getattr(loss_config, "lambda_clean_preserve", 0.0)
+            * train_clean_preserve
+            / n_train
+        ),
         "train/scale_reg": train_scale_reg / n_train,
         "train/delta_reg": train_delta_reg / n_train,
         "train/acc_clean": train_clean_correct / train_total,
@@ -1059,6 +1076,7 @@ def train_one_epoch(
         val_ce_clean = 0.0
         val_ce_pert = 0.0
         val_cons = 0.0
+        val_clean_preserve = 0.0
 
         val_clean_correct = 0
         val_pert_correct = 0
@@ -1120,6 +1138,7 @@ def train_one_epoch(
                 val_ce_clean += loss_dict["loss_ce_clean"].item()
                 val_ce_pert += loss_dict["loss_ce_pert"].item()
                 val_cons += loss_dict["loss_consistency"].item()
+                val_clean_preserve += loss_dict["loss_clean_preserve"].item()
 
         n_val = len(val_dataloader)
 
@@ -1128,6 +1147,12 @@ def train_one_epoch(
             "val/ce_clean": val_ce_clean / n_val,
             "val/ce_pert": val_ce_pert / n_val,
             "val/consistency": val_cons / n_val,
+            "val/clean_preserve": val_clean_preserve / n_val,
+            "val/clean_preserve_weighted": (
+                getattr(loss_config, "lambda_clean_preserve", 0.0)
+                * val_clean_preserve
+                / n_val
+            ),
             "val/acc_clean": val_clean_correct / val_total,
             "val/acc_pert": val_pert_correct / val_total,
         }
@@ -1244,6 +1269,7 @@ def train(config: TrainConfig):
         feature_loss_type=config.loss_config.feature_loss_type,
         lambda_kl=config.loss_config.lambda_kl,
         lambda_feat=config.loss_config.lambda_feat,
+        lambda_clean_preserve=config.loss_config.lambda_clean_preserve,
         temperature=config.loss_config.temperature,
         detach_teacher=config.loss_config.detach_teacher,
         normalize_feature=config.loss_config.normalize_feature,

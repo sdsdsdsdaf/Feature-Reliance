@@ -241,6 +241,7 @@ class LossConfig:
     feature_loss_type: str = "consine" # "cosine", "mse", "mse_sum"
     lambda_kl: float = 1.0
     lambda_feat: float = 1.0
+    lambda_clean_preserve: float = 0.0
     lambda_scale: float = 0.0
     lambda_delta: float = 0.0
     temperature: float = 1.0
