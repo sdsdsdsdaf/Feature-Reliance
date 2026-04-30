@@ -297,6 +297,7 @@ class TrainConfig:
     model_type: Literal["timm_cnn", "timm_vit", "hf_dinov2_cls"] = "timm_cnn"
     freeze_backbone: bool = True
     freeze_linear_head: bool = True
+    freeze_anchor: bool = False
 
     loss_config: LossConfig = None
     optim_config: OptimConfig = None

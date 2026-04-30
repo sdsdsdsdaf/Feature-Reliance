@@ -711,11 +711,8 @@ def build_train_val_dataloaders(config: TrainConfig):
 
     return train_loader, val_loader
 
-def build_train_model(config: TrainConfig):
-    
-
+def get_backbone_source_name(config: TrainConfig):
     model_spec = config.model_spec
-    adaptor_config = config.adpator_config
     timm_model_name_map = {
         ("vit-b", "augreg_in1k"): "vit_base_patch16_224.augreg_in1k",
     }
@@ -724,11 +721,28 @@ def build_train_model(config: TrainConfig):
     }
 
     if config.model_type in ["timm_cnn", "timm_vit"]:
-        backbone_source_name = timm_model_name_map.get(
+        return timm_model_name_map.get(
             (model_spec.model_name, model_spec.pretrained_weight),
             model_spec.model_name,
         )
 
+    if config.model_type == "hf_dinov2_cls":
+        return hf_model_name_map.get(
+            (model_spec.model_name, model_spec.pretrained_weight),
+            model_spec.model_name,
+        )
+
+    raise ValueError(f"Unsupported model_type: {config.model_type}")
+
+
+def build_train_model(config: TrainConfig):
+    
+
+    model_spec = config.model_spec
+    adaptor_config = config.adpator_config
+    backbone_source_name = get_backbone_source_name(config)
+
+    if config.model_type in ["timm_cnn", "timm_vit"]:
         backbone = timm.create_model(
             backbone_source_name,
             pretrained=True,
@@ -747,11 +761,6 @@ def build_train_model(config: TrainConfig):
         )
 
     elif config.model_type == "hf_dinov2_cls":
-        backbone_source_name = hf_model_name_map.get(
-            (model_spec.model_name, model_spec.pretrained_weight),
-            model_spec.model_name,
-        )
-
         backbone = AutoModelForImageClassification.from_pretrained(
             backbone_source_name,
         )
@@ -788,6 +797,35 @@ def build_train_model(config: TrainConfig):
     
 
     return model
+
+
+def build_anchor_model(config: TrainConfig):
+    backbone_source_name = get_backbone_source_name(config)
+
+    if config.model_type in ["timm_cnn", "timm_vit"]:
+        backbone = timm.create_model(
+            backbone_source_name,
+            pretrained=True,
+        )
+
+    elif config.model_type == "hf_dinov2_cls":
+        backbone = AutoModelForImageClassification.from_pretrained(
+            backbone_source_name,
+        )
+
+    else:
+        raise ValueError(f"Unsupported model_type: {config.model_type}")
+
+    model = UnifiedModel(
+        backbone=backbone,
+        model_type=config.model_type,
+    )
+
+    for param in model.parameters():
+        param.requires_grad = False
+
+    model.eval()
+    return model
     
 def train_one_epoch(
     model: nn.Module,
@@ -802,8 +840,11 @@ def train_one_epoch(
     verbose_epoch: int = 1,
     use_wandb: bool = False,
     global_step: int = 0,
+    anchor_model: nn.Module = None,
 ):
     model.train()
+    if anchor_model is not None:
+        anchor_model.eval()
 
     use_amp = scaler is not None
     device_type = "cuda" if torch.device(device).type == "cuda" else "cpu"
@@ -830,12 +871,24 @@ def train_one_epoch(
             logits_clean, feat_clean = model(x_clean, return_features=True)
             logits_pert, feat_pert = model(x_pert, return_features=True)
 
+        anchor_logits = logits_clean
+        anchor_feat = feat_clean
+        if anchor_model is not None:
+            with torch.no_grad():
+                with autocast(device_type=device_type, enabled=use_amp):
+                    anchor_logits, anchor_feat = anchor_model(
+                        x_clean,
+                        return_features=True,
+                    )
+
         loss, loss_dict = criterion(
-            original_logits=logits_clean.float(),
+            clean_logits=logits_clean.float(),
             perturbed_logits=logits_pert.float(),
             labels=y,
-            original_features=feat_clean.float(),
+            clean_features=feat_clean.float(),
             perturbed_features=feat_pert.float(),
+            anchor_logits=anchor_logits.float(),
+            anchor_features=anchor_feat.float(),
         )
 
         scale_reg = get_adaptor_scale_reg(model)
@@ -858,6 +911,8 @@ def train_one_epoch(
                 "logits_pert": logits_pert,
                 "feat_clean": feat_clean,
                 "feat_pert": feat_pert,
+                "anchor_logits": anchor_logits,
+                "anchor_feat": anchor_feat,
                 "loss": loss,
                 **loss_dict,
             },
@@ -939,6 +994,8 @@ def train_one_epoch(
 
     if val_dataloader is not None and (epoch + 1) % verbose_epoch == 0:
         model.eval()
+        if anchor_model is not None:
+            anchor_model.eval()
 
         val_loss = 0.0
         val_ce_clean = 0.0
@@ -959,12 +1016,23 @@ def train_one_epoch(
                     logits_clean, feat_clean = model(x_clean, return_features=True)
                     logits_pert, feat_pert = model(x_pert, return_features=True)
 
+                anchor_logits = logits_clean
+                anchor_feat = feat_clean
+                if anchor_model is not None:
+                    with autocast(device_type=device_type, enabled=use_amp):
+                        anchor_logits, anchor_feat = anchor_model(
+                            x_clean,
+                            return_features=True,
+                        )
+
                 loss, loss_dict = criterion(
-                    original_logits=logits_clean.float(),
+                    clean_logits=logits_clean.float(),
                     perturbed_logits=logits_pert.float(),
                     labels=y,
-                    original_features=feat_clean.float(),
+                    clean_features=feat_clean.float(),
                     perturbed_features=feat_pert.float(),
+                    anchor_logits=anchor_logits.float(),
+                    anchor_features=anchor_feat.float(),
                 )
 
                 assert_finite(
@@ -976,6 +1044,8 @@ def train_one_epoch(
                         "logits_pert": logits_pert,
                         "feat_clean": feat_clean,
                         "feat_pert": feat_pert,
+                        "anchor_logits": anchor_logits,
+                        "anchor_feat": anchor_feat,
                         "loss": loss,
                         **loss_dict,
                     },
@@ -1094,12 +1164,17 @@ def train(config: TrainConfig):
                 "perturbation": config.perturbation,
                 "model_type": config.model_type,
                 "freeze_backbone": config.freeze_backbone,
+                "freeze_anchor": config.freeze_anchor,
             },
         )
 
     train_loader, val_loader = build_train_val_dataloaders(config)
 
     model = build_train_model(config).to(device)
+    anchor_model = None
+    if config.freeze_anchor:
+        anchor_model = build_anchor_model(config).to(device)
+        anchor_model.eval()
 
     optimizer = torch.optim.AdamW(
         build_optimizer_param_groups(model, config.optim_config),
@@ -1129,6 +1204,7 @@ def train(config: TrainConfig):
     for epoch in range(config.optim_config.epochs):
         metrics, global_step = train_one_epoch(
             model=model,
+            anchor_model=anchor_model,
             train_dataloader=train_loader,
             val_dataloader=val_loader,
             optimizer=optimizer,

@@ -91,7 +91,7 @@ if __name__ == "__main__":
     )
 
 
-    DATA_SCOPE = "full"  # "full" or "subset"
+    DATA_SCOPE = "subset"  # "full" or "subset"
 
     if DATA_SCOPE == "subset":
         train_dataset_spec = DatasetSpec(
