@@ -182,12 +182,12 @@ if __name__ == "__main__":
             lambda_feat=1.0,
             lambda_kl=0.1,
             lambda_scale=1e-2,
-            lambda_delta=1e-1,
+            lambda_delta=1.0,
             temperature=2.0,
             detach_teacher=True,
             normalize_feature=True,
-            ce_clean_weight=0.3,
-            ce_pert_weight=1.0
+            ce_clean_weight=0.5,
+            ce_pert_weight=1.0,
         ),
 
         optim_config=OptimConfig(
