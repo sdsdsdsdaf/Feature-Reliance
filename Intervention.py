@@ -177,19 +177,19 @@ if __name__ == "__main__":
         freeze_linear_head=True,
         freeze_anchor=True,
 
-        loss_config=LossConfig(
+        loss_config = LossConfig(
             mode="feature",
             feature_loss_type="mse_sum",
-            lambda_feat=0.3,
+            lambda_feat=0.1,
             lambda_kl=0.1,
-            lambda_clean_preserve=1.0,
+            lambda_clean_preserve=1,
             lambda_scale=1e-2,
             lambda_delta=1.0,
             temperature=2.0,
             detach_teacher=True,
             normalize_feature=True,
             ce_clean_weight=1.0,
-            ce_pert_weight=1.0,
+            ce_pert_weight=0.2,
         ),
 
         optim_config=OptimConfig(
@@ -201,7 +201,7 @@ if __name__ == "__main__":
 
         logging_config=LoggingConfig(
             use_wandb=True,
-            run_name="resnet50_localwarp_feature_ce_clean=0.3",
+            run_name="resnet50_localwarp_clean-perseve=0.1_perturb_signal_weak",
             verbose_epoch=1,
         ),
         
@@ -210,7 +210,7 @@ if __name__ == "__main__":
             use_norm=True,
             use_trainable_scale=True,
             init_scale=1e-3,
-            target_layers="last1"
+            target_layers="last2"
         )
     )
         
