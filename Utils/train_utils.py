@@ -1,3 +1,5 @@
+from dataclasses import asdict
+
 import torch
 import torch.nn as nn
 from torch.amp import autocast
@@ -1264,19 +1266,11 @@ def train(config: TrainConfig):
         betas=(0.9, 0.999),
     )
 
-    criterion = ConsistencyLoss(
-        mode=config.loss_config.mode,
-        feature_loss_type=config.loss_config.feature_loss_type,
-        lambda_kl=config.loss_config.lambda_kl,
-        lambda_feat=config.loss_config.lambda_feat,
-        lambda_clean_preserve=config.loss_config.lambda_clean_preserve,
-        temperature=config.loss_config.temperature,
-        detach_teacher=config.loss_config.detach_teacher,
-        normalize_feature=config.loss_config.normalize_feature,
-        ce_clean_weight=config.loss_config.ce_clean_weight,
-        ce_pert_weight=config.loss_config.ce_pert_weight,
-        eps=config.loss_config.eps,
-    ).to(device)
+    loss_kwargs = asdict(config.loss_config)
+    for train_only_key in ("lambda_scale", "lambda_delta"):
+        loss_kwargs.pop(train_only_key, None)
+
+    criterion = ConsistencyLoss(**loss_kwargs).to(device)
     
     scaler = None
     if config.optim_config.use_amp and device_obj.type == "cuda":
