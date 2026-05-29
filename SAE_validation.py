@@ -118,13 +118,13 @@ SAE_ACTIVE_THRESHOLD = 0.2
 # Training hyperparameters
 TARGET_BLOCK = 9          # vit_b.blocks[11]
 TOKEN_SCOPE = "all"       # "cls", "patch", "all"
-MAX_TRAIN_TOKENS = 50_000  # None means stream over all train tokens
-MAX_VAL_TOKENS = 10_000
+MAX_TRAIN_TOKENS = 100_000  # None means stream over all train tokens
+MAX_VAL_TOKENS = 50_000
 BS = 128
 EPOCHS = 300
 L1_REG = 8e-5
 SAE_LR = 1e-4
-SAE_BATCH_SIZE = 1024
+SAE_BATCH_SIZE = 4096
 TOKEN_CACHE_DTYPE = torch.float16
 TOKEN_NORMALIZE_CHUNK_SIZE = 65_536
 BIAS_INIT_GEOM_MAX_ITER = 100
@@ -174,6 +174,7 @@ def print_sae_hyperparameters():
             print(f"  {name:<{name_width}} : {value}")
     return hyperparameters
 
+print_sae_hyperparameters()
 # %% [markdown]
 # # SAE
 # 
@@ -532,6 +533,27 @@ def _run_sae_step(sae, optimizer, xb):
     return loss, recon_loss, l1_loss, x_hat, z
 
 
+def format_sae_epoch_log(row, hidden_dim=None, threshold=SAE_ACTIVE_THRESHOLD):
+    active_threshold = row.get('active_threshold', threshold)
+    active_mean_count = row.get('active_mean_count', row['mean_l0'])
+    active_total = row.get('active_total', hidden_dim)
+    active_ratio = row.get('active_ratio')
+    if active_ratio is None and active_total is not None:
+        active_ratio = active_mean_count / max(1, int(active_total))
+    active_total_text = str(int(active_total)) if active_total is not None else "?"
+    active_ratio_text = f"{active_ratio * 100:.2f}%" if active_ratio is not None else "n/a"
+
+    return (
+        f"epoch {int(row['epoch']):03d} | "
+        f"train_loss={row['train_loss']:.6f} | "
+        f"train_mse={row['train_mse']:.6f} | "
+        f"train_l1={row['train_l1']:.6f} | "
+        f"val_mse={row['mse']:.6f} | "
+        f"val_nmse={row['normalized_mse']:.4f} | "
+        f"active>{active_threshold:g}={active_mean_count:.2f}/{active_total_text} ({active_ratio_text})"
+    )
+
+
 def train_sae_streaming(model, loader, val_token, token_stats, input_dim, hidden_dim, b_dec_init, max_tokens=None, expected_tokens=None, target_block=TARGET_BLOCK, token_scope=TOKEN_SCOPE, device=DEVICE):
     sae = VanillaL1SAE(input_dim=input_dim, hidden_dim=hidden_dim, X_train=None, b_dec_init=b_dec_init, dec_bias_mode=DEC_BIAS_MODE).to(device)
     optimizer = torch.optim.AdamW(sae.parameters(), lr=SAE_LR)
@@ -586,6 +608,8 @@ def train_sae_streaming(model, loader, val_token, token_stats, input_dim, hidden
                 del xb, x_hat, z, loss, recon_loss, l1_loss, carry
 
         val_metrics = evaluate_sae_tokens(sae, val_token, device=device)
+        active_mean_count = val_metrics['mean_l0']
+        active_total = int(hidden_dim)
         row = {
             'epoch': epoch,
             'train_loss': train_loss_sum / max(1, train_rows),
@@ -593,16 +617,13 @@ def train_sae_streaming(model, loader, val_token, token_stats, input_dim, hidden
             'train_l1': train_l1_sum / max(1, train_rows),
             'train_rows': train_rows,
             **val_metrics,
+            'active_threshold': SAE_ACTIVE_THRESHOLD,
+            'active_mean_count': active_mean_count,
+            'active_total': active_total,
+            'active_ratio': active_mean_count / max(1, active_total),
         }
         history.append(row)
-        print(
-            f"epoch {epoch:03d} | "
-            f"train_loss={row['train_loss']:.6f} "
-            f"train_mse={row['train_mse']:.6f} "
-            f"train_l1={row['train_l1']:.6f} "
-            f"val_nmse={row['normalized_mse']:.6f} "
-            f"val_l0={row['mean_l0']:.2f}"
-        )
+        print(format_sae_epoch_log(row, hidden_dim=hidden_dim))
     return sae, history
 
 
@@ -1684,12 +1705,7 @@ LAST_EPOCHS_TO_PRINT = 50
 if 'sae_history' not in globals() or not sae_history:
     raise ValueError('sae_history is empty. Run the SAE training cell first.')
 
+log_hidden_dim = trained_sae.hidden_dim if 'trained_sae' in globals() else globals().get('sae_hidden_dim')
+
 for row in sae_history[-LAST_EPOCHS_TO_PRINT:]:
-    print(
-        f"epoch {int(row['epoch']):03d} | "
-        f"train_loss={row['train_loss']:.6f} "
-        f"train_mse={row['train_mse']:.6f} "
-        f"train_l1={row['train_l1']:.6f} "
-        f"val_nmse={row['normalized_mse']:.6f} "
-        f"val_l0={row['mean_l0']:.2f}"
-    )
+    print(format_sae_epoch_log(row, hidden_dim=log_hidden_dim))
