@@ -124,7 +124,7 @@ BS = 128
 EPOCHS = 300
 L1_REG = 8e-5
 SAE_LR = 1e-4
-SAE_BATCH_SIZE = 512
+SAE_BATCH_SIZE = 1024
 TOKEN_CACHE_DTYPE = torch.float16
 TOKEN_NORMALIZE_CHUNK_SIZE = 65_536
 BIAS_INIT_GEOM_MAX_ITER = 100
@@ -132,6 +132,47 @@ BIAS_INIT_GEOM_TOL = 1e-5
 
 if (not TARGET_BLOCK == 11) and (not TOKEN_SCOPE.lower() == 'patch'):
     TOKEN_SCOPE = 'patch'
+
+
+def print_sae_hyperparameters():
+    sections = {
+        "Runtime": {
+            "DEVICE": DEVICE,
+        },
+        "SAE": {
+            "EXPANSION": EXPANSION,
+            "DEC_BIAS_MODE": DEC_BIAS_MODE,
+            "SAE_ACTIVE_THRESHOLD": SAE_ACTIVE_THRESHOLD,
+        },
+        "Training": {
+            "TARGET_BLOCK": TARGET_BLOCK,
+            "TOKEN_SCOPE": TOKEN_SCOPE,
+            "MAX_TRAIN_TOKENS": MAX_TRAIN_TOKENS,
+            "MAX_VAL_TOKENS": MAX_VAL_TOKENS,
+            "BS": BS,
+            "EPOCHS": EPOCHS,
+            "L1_REG": L1_REG,
+            "SAE_LR": SAE_LR,
+            "SAE_BATCH_SIZE": SAE_BATCH_SIZE,
+        },
+        "Cache and init": {
+            "TOKEN_CACHE_DTYPE": TOKEN_CACHE_DTYPE,
+            "TOKEN_NORMALIZE_CHUNK_SIZE": TOKEN_NORMALIZE_CHUNK_SIZE,
+            "BIAS_INIT_GEOM_MAX_ITER": BIAS_INIT_GEOM_MAX_ITER,
+            "BIAS_INIT_GEOM_TOL": BIAS_INIT_GEOM_TOL,
+        },
+    }
+    hyperparameters = {name: value for params in sections.values() for name, value in params.items()}
+    name_width = max(len(name) for name in hyperparameters)
+    title = "SAE Hyperparameters"
+
+    print(f"\n{title}")
+    print("=" * max(len(title), name_width + 16))
+    for section, params in sections.items():
+        print(f"\n[{section}]")
+        for name, value in params.items():
+            print(f"  {name:<{name_width}} : {value}")
+    return hyperparameters
 
 # %% [markdown]
 # # SAE
@@ -565,6 +606,61 @@ def train_sae_streaming(model, loader, val_token, token_stats, input_dim, hidden
     return sae, history
 
 
+def plot_sae_training_history(history, hidden_dim=None, active_threshold=SAE_ACTIVE_THRESHOLD, figsize=(12, 8)):
+    if not history:
+        raise ValueError('history is empty.')
+
+    epochs = np.array([row['epoch'] for row in history], dtype=float)
+    train_loss = np.array([row['train_loss'] for row in history], dtype=float)
+    train_mse = np.array([row['train_mse'] for row in history], dtype=float)
+    val_mse = np.array([row['mse'] for row in history], dtype=float)
+    train_l1 = np.array([row['train_l1'] for row in history], dtype=float)
+    val_nmse = np.array([row['normalized_mse'] for row in history], dtype=float)
+    one_minus_val_cosine = 1.0 - np.array([row['cosine'] for row in history], dtype=float)
+    mean_l0 = np.array([row['mean_l0'] for row in history], dtype=float)
+
+    fig, axes = plt.subplots(2, 2, figsize=figsize)
+    ax_loss, ax_l1, ax_quality, ax_active = axes.reshape(-1)
+
+    ax_loss.plot(epochs, train_loss, label='train_loss')
+    ax_loss.plot(epochs, train_mse, label='train_mse')
+    ax_loss.plot(epochs, val_mse, label='val_mse')
+    ax_loss.set_title('Loss / MSE')
+    ax_loss.set_xlabel('epoch')
+    ax_loss.set_ylabel('value')
+    ax_loss.grid(True, alpha=0.3)
+    ax_loss.legend()
+
+    ax_l1.plot(epochs, train_l1)
+    ax_l1.set_title('L1 activation penalty term')
+    ax_l1.set_xlabel('epoch')
+    ax_l1.set_ylabel('mean |z|')
+    ax_l1.grid(True, alpha=0.3)
+
+    ax_quality.plot(epochs, val_nmse, label='val_nmse')
+    ax_quality.plot(epochs, one_minus_val_cosine, label='1 - val_cosine')
+    ax_quality.set_title('Validation quality')
+    ax_quality.set_xlabel('epoch')
+    ax_quality.set_ylabel('value')
+    ax_quality.grid(True, alpha=0.3)
+    ax_quality.legend()
+
+    if hidden_dim is not None:
+        active_values = mean_l0 / max(1, int(hidden_dim))
+        active_ylabel = 'active latent ratio'
+    else:
+        active_values = mean_l0
+        active_ylabel = 'mean active latents'
+    ax_active.plot(epochs, active_values)
+    ax_active.set_title(f'Active latents > {active_threshold:g}')
+    ax_active.set_xlabel('epoch')
+    ax_active.set_ylabel(active_ylabel)
+    ax_active.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    return fig
+
+
 @torch.no_grad()
 def evaluate_sae_tokens(sae:nn.Module, tokens_norm, batch_size=SAE_BATCH_SIZE, threshold=SAE_ACTIVE_THRESHOLD, device=DEVICE):
     sae.eval().to(device)
@@ -628,6 +724,8 @@ trained_sae, sae_history = train_sae_streaming(
     max_tokens=MAX_TRAIN_TOKENS,
     expected_tokens=sae_train_token_count,
 )
+sae_train_log_fig = plot_sae_training_history(sae_history, hidden_dim=trained_sae.hidden_dim)
+save_show_close(sae_train_log_fig, "sae_train_log")
 del sae_b_dec_init
 sae_validation_metrics = evaluate_sae_tokens(trained_sae, sae_val_tokens)
 sae_latent_frequency = latent_frequency(trained_sae, sae_val_tokens)
@@ -1595,4 +1693,3 @@ for row in sae_history[-LAST_EPOCHS_TO_PRINT:]:
         f"val_nmse={row['normalized_mse']:.6f} "
         f"val_l0={row['mean_l0']:.2f}"
     )
-
