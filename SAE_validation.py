@@ -118,8 +118,8 @@ SAE_ACTIVE_THRESHOLD = 0.2
 # Training hyperparameters
 TARGET_BLOCK = 9          # vit_b.blocks[11]
 TOKEN_SCOPE = "all"       # "cls", "patch", "all"
-MAX_TRAIN_TOKENS = 100_000  # None means stream over all train tokens
-MAX_VAL_TOKENS = 50_000
+MAX_TRAIN_TOKENS = 1_000_000  # None means stream over all train tokens
+MAX_VAL_TOKENS = None
 BS = 128
 EPOCHS = 300
 L1_REG = 8e-5
