@@ -1709,3 +1709,5 @@ log_hidden_dim = trained_sae.hidden_dim if 'trained_sae' in globals() else globa
 
 for row in sae_history[-LAST_EPOCHS_TO_PRINT:]:
     print(format_sae_epoch_log(row, hidden_dim=log_hidden_dim))
+
+#TEST Commit
