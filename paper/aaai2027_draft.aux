@@ -1,0 +1,58 @@
+\relax 
+\citation{geirhos2019imagenet}
+\citation{burgert2025feature}
+\@writefile{toc}{\contentsline {section}{\numberline {1}Introduction}{1}{}\protected@file@percent }
+\citation{geirhos2019imagenet}
+\citation{burgert2025feature}
+\citation{hendrycks2021many}
+\citation{gulrajani2021search}
+\citation{kornblith2019similarity}
+\citation{cunningham2024sparse}
+\citation{bau2017network}
+\citation{kowal2024vcc}
+\citation{stevens2025saev}
+\citation{flovik2025salve}
+\@writefile{toc}{\contentsline {section}{\numberline {2}Related Work}{2}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Texture and shape bias.}{2}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Out-of-distribution generalization.}{2}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Representation similarity and mechanistic validation.}{3}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {3}Method}{3}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Controlled Feature Suppression}{3}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Feature Reliance Score}{3}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Sparse Autoencoder Validation}{4}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4}Experimental Setup}{4}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Models.}{4}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Datasets.}{4}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Perturbation sweep.}{4}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5}Results}{4}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.1}Baseline Accuracy}{4}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.2}Feature Reliance Differs by Feature Family}{4}{}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Original-image accuracy before controlled suppression.}}{5}{}\protected@file@percent }
+\newlabel{tab:base}{{1}{5}{}{}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Mean feature reliance across model, dataset, and perturbation family. Shape-disrupting perturbations, especially local warp and patch-level rearrangements, dominate the ImageNet-R failure pattern.}}{5}{}\protected@file@percent }
+\newlabel{fig:fr_heatmap}{{1}{5}{}{}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.3}Representation Shift Tracks Reliance}{5}{}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces Mean controlled-suppression results. FR denotes feature reliance ($1-\mathrm  {relative\ accuracy}$); JS denotes Jensen-Shannon divergence.}}{6}{}\protected@file@percent }
+\newlabel{tab:fr_mean}{{2}{6}{}{}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.4}ViT-B/16 Is More Stable under Moderate Shape Disruption}{6}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.5}Severe Local Warping Exposes a Failure Mode}{6}{}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Feature reliance is strongly associated with predictive distribution shift, measured by Jensen-Shannon divergence between original and transformed logits.}}{7}{}\protected@file@percent }
+\newlabel{fig:fr_js}{{2}{7}{}{}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {6}Discussion}{7}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {7}Limitations}{7}{}\protected@file@percent }
+\bibstyle{plain}
+\bibdata{references}
+\bibcite{bau2017network}{1}
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces Feature reliance is negatively associated with representation similarity, measured by linear CKA between original and transformed representations.}}{8}{}\protected@file@percent }
+\newlabel{fig:fr_cka}{{3}{8}{}{}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {8}Conclusion}{8}{}\protected@file@percent }
+\bibcite{burgert2025feature}{2}
+\bibcite{flovik2025salve}{3}
+\bibcite{geirhos2019imagenet}{4}
+\bibcite{gulrajani2021search}{5}
+\bibcite{hendrycks2021many}{6}
+\bibcite{cunningham2024sparse}{7}
+\bibcite{kornblith2019similarity}{8}
+\bibcite{kowal2024vcc}{9}
+\bibcite{stevens2025saev}{10}
+\gdef \@abspage@last{10}

@@ -1,6 +1,7 @@
 # %%
 import gc
 import math
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -13,6 +14,8 @@ from torch.utils.data import Dataset, DataLoader
 import timm
 from timm.data import resolve_model_data_config, create_transform
 from tqdm.auto import tqdm
+
+torch.set_float32_matmul_precision("high")
 
 
 # %% [markdown]
@@ -112,23 +115,36 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # SAE Setting
 EXPANSION = 64
-DEC_BIAS_MODE = "geom"
+DEC_BIAS_MODE = "geom"  # "zero", "mean", "geom"
 SAE_ACTIVE_THRESHOLD = 0.2
 
 # Training hyperparameters
-TARGET_BLOCK = 9          # vit_b.blocks[11]
+TARGET_BLOCK = 10          # vit_b.blocks[11]
 TOKEN_SCOPE = "all"       # "cls", "patch", "all"
 MAX_TRAIN_TOKENS = 1_000_000  # None means stream over all train tokens
 MAX_VAL_TOKENS = None
 BS = 128
-EPOCHS = 300
-L1_REG = 8e-5
+EPOCHS = 350
+L1_REG = 1e-4
 SAE_LR = 1e-4
-SAE_BATCH_SIZE = 4096
+SAE_BATCH_SIZE = 7096
 TOKEN_CACHE_DTYPE = torch.float16
 TOKEN_NORMALIZE_CHUNK_SIZE = 65_536
 BIAS_INIT_GEOM_MAX_ITER = 100
 BIAS_INIT_GEOM_TOL = 1e-5
+MODEL_COMPILE = True
+
+# Token source mode
+TOKEN_SOURCE_MODE = "auto"  # "auto", "cache", "stream"
+TOKEN_CACHE_MAX_CPU_GIB = 8.0
+TOKEN_CACHE_BUILD_PEAK_FACTOR = 3.0
+TOKEN_CACHE_MIN_FREE_CPU_GIB_AFTER_BUILD = 4.0
+TOKEN_CACHE_NUM_WORKERS = 0
+
+# AMP and finite checks
+SAE_USE_AMP = torch.cuda.is_available()
+SAE_AMP_DTYPE = torch.bfloat16
+SAE_CHECK_FINITE = True
 
 if (not TARGET_BLOCK == 11) and (not TOKEN_SCOPE.lower() == 'patch'):
     TOKEN_SCOPE = 'patch'
@@ -160,6 +176,17 @@ def print_sae_hyperparameters():
             "TOKEN_NORMALIZE_CHUNK_SIZE": TOKEN_NORMALIZE_CHUNK_SIZE,
             "BIAS_INIT_GEOM_MAX_ITER": BIAS_INIT_GEOM_MAX_ITER,
             "BIAS_INIT_GEOM_TOL": BIAS_INIT_GEOM_TOL,
+            "TOKEN_SOURCE_MODE": TOKEN_SOURCE_MODE,
+            "TOKEN_CACHE_MAX_CPU_GIB": TOKEN_CACHE_MAX_CPU_GIB,
+            "TOKEN_CACHE_BUILD_PEAK_FACTOR": TOKEN_CACHE_BUILD_PEAK_FACTOR,
+            "TOKEN_CACHE_MIN_FREE_CPU_GIB_AFTER_BUILD": TOKEN_CACHE_MIN_FREE_CPU_GIB_AFTER_BUILD,
+            "TOKEN_CACHE_NUM_WORKERS": TOKEN_CACHE_NUM_WORKERS,
+        },
+        "AMP": {
+            "MODEL_COMPILE": MODEL_COMPILE,
+            "SAE_USE_AMP": SAE_USE_AMP,
+            "SAE_AMP_DTYPE": SAE_AMP_DTYPE,
+            "SAE_CHECK_FINITE": SAE_CHECK_FINITE,
         },
     }
     hyperparameters = {name: value for params in sections.values() for name, value in params.items()}
@@ -217,11 +244,11 @@ class VanillaL1SAE(nn.Module):
             self.b_dec.copy_(b_dec_init.reshape(-1).to(dtype=self.b_dec.dtype, device=self.b_dec.device))
 
     def encode(self, x: torch.Tensor):
-        sae_in = x.to(self.W_enc.dtype) - self.b_dec
-        return F.relu(sae_in @ self.W_enc + self.b_enc)
+        sae_in = x - self.b_dec
+        return F.relu(F.linear(sae_in, self.W_enc.T, self.b_enc))
 
     def decode(self, z: torch.Tensor):
-        return z.to(self.W_dec.dtype) @ self.W_dec + self.b_dec
+        return F.linear(z, self.W_dec.T, self.b_dec)
 
     @torch.no_grad()
     def set_decoder_norm_to_unit_norm(self, eps=1e-8):
@@ -503,6 +530,7 @@ def compute_b_dec_init_streaming(
         raise ValueError(f'Unknown dec_bias_mode: {dec_bias_mode}')
 
     y = torch.zeros(dim, dtype=torch.float32)
+
     for _ in tqdm(range(int(max_iter)), desc='streaming b_dec geometric median'):
         numerator = torch.zeros(dim, dtype=torch.float64)
         denominator = torch.zeros((), dtype=torch.float64)
@@ -520,15 +548,48 @@ def compute_b_dec_init_streaming(
     return y
 
 
-def _run_sae_step(sae, optimizer, xb):
-    x_hat, z = sae(xb)
-    recon_loss = F.mse_loss(x_hat, xb)
-    l1_loss = z.abs().sum(dim=-1).mean()
-    loss = recon_loss + L1_REG * l1_loss
+def _run_sae_step(
+    sae,
+    optimizer,
+    xb,
+    scaler=None,
+    use_amp=SAE_USE_AMP,
+    amp_dtype=SAE_AMP_DTYPE,
+    check_finite=SAE_CHECK_FINITE,
+    device=DEVICE,
+):
+    amp_enabled = _amp_enabled(device=device, use_amp=use_amp)
+    if scaler is None:
+        scaler = _make_grad_scaler(device=device, use_amp=use_amp, amp_dtype=amp_dtype)
+
+    autocast_device = "cuda" if str(device).startswith("cuda") else "cpu"
+    with torch.autocast(device_type=autocast_device, dtype=amp_dtype, enabled=amp_enabled):
+        x_hat, z = sae(xb)
+        recon_loss = F.mse_loss(x_hat, xb)
+        l1_loss = z.abs().sum(dim=-1).mean()
+        loss = recon_loss + L1_REG * l1_loss
+
+    if check_finite:
+        _assert_finite_tensor("SAE forward loss", loss)
+        _assert_finite_tensor("SAE reconstruction loss", recon_loss)
+        _assert_finite_tensor("SAE L1 loss", l1_loss)
+
     optimizer.zero_grad(set_to_none=True)
-    loss.backward()
+    if scaler.is_enabled():
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+    else:
+        loss.backward()
+
+    if check_finite:
+        _assert_finite_grads(sae)
+
     sae.remove_gradient_parallel_to_decoder_directions()
-    optimizer.step()
+    if scaler.is_enabled():
+        scaler.step(optimizer)
+        scaler.update()
+    else:
+        optimizer.step()
     sae.set_decoder_norm_to_unit_norm()
     return loss, recon_loss, l1_loss, x_hat, z
 
@@ -542,6 +603,8 @@ def format_sae_epoch_log(row, hidden_dim=None, threshold=SAE_ACTIVE_THRESHOLD):
         active_ratio = active_mean_count / max(1, int(active_total))
     active_total_text = str(int(active_total)) if active_total is not None else "?"
     active_ratio_text = f"{active_ratio * 100:.2f}%" if active_ratio is not None else "n/a"
+    epoch_seconds = row.get('epoch_seconds')
+    time_text = f" | epoch={float(epoch_seconds):.2f}s" if epoch_seconds is not None else ""
 
     return (
         f"epoch {int(row['epoch']):03d} | "
@@ -551,19 +614,112 @@ def format_sae_epoch_log(row, hidden_dim=None, threshold=SAE_ACTIVE_THRESHOLD):
         f"val_mse={row['mse']:.6f} | "
         f"val_nmse={row['normalized_mse']:.4f} | "
         f"active>{active_threshold:g}={active_mean_count:.2f}/{active_total_text} ({active_ratio_text})"
+        f"{time_text}"
     )
 
 
-def train_sae_streaming(model, loader, val_token, token_stats, input_dim, hidden_dim, b_dec_init, max_tokens=None, expected_tokens=None, target_block=TARGET_BLOCK, token_scope=TOKEN_SCOPE, device=DEVICE):
+def _dtype_element_size(dtype):
+    if dtype is None:
+        dtype = torch.float32
+    return torch.empty((), dtype=dtype).element_size()
+
+
+def estimate_token_cache_bytes(num_tokens, input_dim, dtype):
+    return int(num_tokens) * int(input_dim) * _dtype_element_size(dtype)
+
+
+def get_available_cpu_memory_bytes():
+    try:
+        import psutil
+        return int(psutil.virtual_memory().available)
+    except Exception:
+        return None
+
+
+def format_gib(num_bytes):
+    if num_bytes is None:
+        return "unknown"
+    return f"{float(num_bytes) / (1024 ** 3):.2f} GiB"
+
+
+def choose_token_source_mode(
+    requested_mode,
+    expected_tokens,
+    input_dim,
+    dtype,
+    max_cpu_gib=TOKEN_CACHE_MAX_CPU_GIB,
+    peak_factor=TOKEN_CACHE_BUILD_PEAK_FACTOR,
+    min_free_after_build_gib=TOKEN_CACHE_MIN_FREE_CPU_GIB_AFTER_BUILD,
+):
+    requested_mode = str(requested_mode).lower()
+    if requested_mode not in {"auto", "cache", "stream"}:
+        raise ValueError("TOKEN_SOURCE_MODE must be one of: 'auto', 'cache', 'stream'.")
+    if requested_mode in {"cache", "stream"}:
+        return requested_mode
+    if expected_tokens is None:
+        print("Token source auto decision: expected_tokens is unknown; using stream mode.")
+        return "stream"
+
+    cache_bytes = estimate_token_cache_bytes(expected_tokens, input_dim, dtype)
+    peak_bytes = int(cache_bytes * float(peak_factor))
+    max_cpu_bytes = int(float(max_cpu_gib) * (1024 ** 3))
+    min_free_after_bytes = int(float(min_free_after_build_gib) * (1024 ** 3))
+    available_cpu_bytes = get_available_cpu_memory_bytes()
+    fits_policy = peak_bytes <= max_cpu_bytes
+    fits_available = (
+        available_cpu_bytes is None
+        or peak_bytes + min_free_after_bytes <= available_cpu_bytes
+    )
+
+    print("Token source auto decision:")
+    print(f"  expected_tokens              : {int(expected_tokens):,}")
+    print(f"  input_dim                    : {int(input_dim)}")
+    print(f"  cache dtype                  : {dtype}")
+    print(f"  estimated cache              : {format_gib(cache_bytes)}")
+    print(f"  estimated build peak         : {format_gib(peak_bytes)}")
+    print(f"  max allowed build peak       : {float(max_cpu_gib):.2f} GiB")
+    print(f"  min free CPU after build     : {float(min_free_after_build_gib):.2f} GiB")
+    print(f"  available CPU memory         : {format_gib(available_cpu_bytes)}")
+    print(f"  fits policy / available      : {fits_policy} / {fits_available}")
+    return "cache" if fits_policy and fits_available else "stream"
+
+
+def _amp_enabled(device=DEVICE, use_amp=SAE_USE_AMP):
+    return bool(use_amp and str(device).startswith("cuda") and torch.cuda.is_available())
+
+
+def _make_grad_scaler(device=DEVICE, use_amp=SAE_USE_AMP, amp_dtype=SAE_AMP_DTYPE):
+    enabled = _amp_enabled(device=device, use_amp=use_amp) and amp_dtype == torch.float16
+    return torch.amp.GradScaler("cuda", enabled=enabled)
+
+
+def _assert_finite_tensor(name, tensor):
+    if tensor is not None and not torch.isfinite(tensor).all().item():
+        raise FloatingPointError(f"Non-finite value detected in {name}.")
+
+
+def _assert_finite_grads(model):
+    for name, param in model.named_parameters():
+        if param.grad is not None and not torch.isfinite(param.grad).all().item():
+            raise FloatingPointError(f"Non-finite gradient detected in {name}.")
+
+
+def train_sae_streaming(model, loader, val_token, token_stats, input_dim, hidden_dim, b_dec_init, max_tokens=None, expected_tokens=None, target_block=TARGET_BLOCK, token_scope=TOKEN_SCOPE, device=DEVICE, model_compile=MODEL_COMPILE, use_amp=SAE_USE_AMP, amp_dtype=SAE_AMP_DTYPE, check_finite=SAE_CHECK_FINITE):
     sae = VanillaL1SAE(input_dim=input_dim, hidden_dim=hidden_dim, X_train=None, b_dec_init=b_dec_init, dec_bias_mode=DEC_BIAS_MODE).to(device)
     optimizer = torch.optim.AdamW(sae.parameters(), lr=SAE_LR)
+    scaler = _make_grad_scaler(device=device, use_amp=use_amp, amp_dtype=amp_dtype)
     history = []
     if expected_tokens is None and max_tokens is not None:
         expected_tokens = int(max_tokens)
     expected_steps = math.ceil(int(expected_tokens) / SAE_BATCH_SIZE) if expected_tokens is not None else None
     print(f"SAE train tokens per epoch: {expected_tokens if expected_tokens is not None else 'unknown'}")
 
+    if model_compile and hasattr(torch, 'compile'):
+        print("Compiling SAE model...")
+        sae = torch.compile(sae)
+
     for epoch in range(1, EPOCHS + 1):
+        epoch_start_time = time.perf_counter()
         sae.train()
         train_loss_sum = train_mse_sum = train_l1_sum = 0.0
         train_rows = 0
@@ -581,7 +737,16 @@ def train_sae_streaming(model, loader, val_token, token_stats, input_dim, hidden
 
                 for start in range(0, full_count, SAE_BATCH_SIZE):
                     xb = token_batch[start:start + SAE_BATCH_SIZE].float().to(device)
-                    loss, recon_loss, l1_loss, x_hat, z = _run_sae_step(sae, optimizer, xb)
+                    loss, recon_loss, l1_loss, x_hat, z = _run_sae_step(
+                        sae,
+                        optimizer,
+                        xb,
+                        scaler=scaler,
+                        use_amp=use_amp,
+                        amp_dtype=amp_dtype,
+                        check_finite=check_finite,
+                        device=device,
+                    )
                     train_loss_sum += float(loss.item()) * xb.shape[0]
                     train_mse_sum += float(recon_loss.item()) * xb.shape[0]
                     train_l1_sum += float(l1_loss.item()) * xb.shape[0]
@@ -598,7 +763,16 @@ def train_sae_streaming(model, loader, val_token, token_stats, input_dim, hidden
 
             if carry is not None and carry.numel() > 0:
                 xb = carry.float().to(device)
-                loss, recon_loss, l1_loss, x_hat, z = _run_sae_step(sae, optimizer, xb)
+                loss, recon_loss, l1_loss, x_hat, z = _run_sae_step(
+                    sae,
+                    optimizer,
+                    xb,
+                    scaler=scaler,
+                    use_amp=use_amp,
+                    amp_dtype=amp_dtype,
+                    check_finite=check_finite,
+                    device=device,
+                )
                 train_loss_sum += float(loss.item()) * xb.shape[0]
                 train_mse_sum += float(recon_loss.item()) * xb.shape[0]
                 train_l1_sum += float(l1_loss.item()) * xb.shape[0]
@@ -608,6 +782,7 @@ def train_sae_streaming(model, loader, val_token, token_stats, input_dim, hidden
                 del xb, x_hat, z, loss, recon_loss, l1_loss, carry
 
         val_metrics = evaluate_sae_tokens(sae, val_token, device=device)
+        epoch_seconds = time.perf_counter() - epoch_start_time
         active_mean_count = val_metrics['mean_l0']
         active_total = int(hidden_dim)
         row = {
@@ -621,10 +796,122 @@ def train_sae_streaming(model, loader, val_token, token_stats, input_dim, hidden
             'active_mean_count': active_mean_count,
             'active_total': active_total,
             'active_ratio': active_mean_count / max(1, active_total),
+            'epoch_seconds': epoch_seconds,
         }
         history.append(row)
         print(format_sae_epoch_log(row, hidden_dim=hidden_dim))
     return sae, history
+
+
+def train_sae_cached(model, loader, val_token, token_stats, input_dim, hidden_dim, b_dec_init, max_tokens=None, expected_tokens=None, target_block=TARGET_BLOCK, token_scope=TOKEN_SCOPE, device=DEVICE, model_compile=MODEL_COMPILE, use_amp=SAE_USE_AMP, amp_dtype=SAE_AMP_DTYPE, check_finite=SAE_CHECK_FINITE):
+    print("Collecting train tokens once for cached SAE training...")
+    train_tokens = collect_tokens_with_hook(
+        model,
+        loader,
+        max_tokens=max_tokens,
+        target_block=target_block,
+        token_scope=token_scope,
+        device=device,
+    )
+    train_tokens = normalize_tokens_inplace(train_tokens.float(), token_stats)
+    if TOKEN_CACHE_DTYPE is not None:
+        train_tokens = train_tokens.to(TOKEN_CACHE_DTYPE)
+    train_tokens = train_tokens.cpu()
+
+    token_ds = torch.utils.data.TensorDataset(train_tokens)
+    token_loader = DataLoader(
+        token_ds,
+        batch_size=SAE_BATCH_SIZE,
+        shuffle=True,
+        num_workers=TOKEN_CACHE_NUM_WORKERS,
+        pin_memory=str(device).startswith("cuda"),
+        drop_last=False,
+    )
+
+    sae = VanillaL1SAE(input_dim=input_dim, hidden_dim=hidden_dim, X_train=None, b_dec_init=b_dec_init, dec_bias_mode=DEC_BIAS_MODE).to(device)
+    optimizer = torch.optim.AdamW(sae.parameters(), lr=SAE_LR)
+    scaler = _make_grad_scaler(device=device, use_amp=use_amp, amp_dtype=amp_dtype)
+    history = []
+    print(f"SAE cached train tokens per epoch: {len(token_ds):,}")
+
+    if model_compile and hasattr(torch, 'compile'):
+        print("Compiling SAE model...")
+        sae = torch.compile(sae)
+
+    for epoch in range(1, EPOCHS + 1):
+        epoch_start_time = time.perf_counter()
+        sae.train()
+        train_loss_sum = train_mse_sum = train_l1_sum = 0.0
+        train_rows = 0
+
+        for (xb_cpu,) in tqdm(token_loader, desc=f'SAE cached epoch {epoch}/{EPOCHS}', leave=False):
+            xb = xb_cpu.to(device, non_blocking=True).float()
+            loss, recon_loss, l1_loss, x_hat, z = _run_sae_step(
+                sae,
+                optimizer,
+                xb,
+                scaler=scaler,
+                use_amp=use_amp,
+                amp_dtype=amp_dtype,
+                check_finite=check_finite,
+                device=device,
+            )
+            train_loss_sum += float(loss.item()) * xb.shape[0]
+            train_mse_sum += float(recon_loss.item()) * xb.shape[0]
+            train_l1_sum += float(l1_loss.item()) * xb.shape[0]
+            train_rows += xb.shape[0]
+            del xb, x_hat, z, loss, recon_loss, l1_loss
+
+        val_metrics = evaluate_sae_tokens(sae, val_token, device=device)
+        epoch_seconds = time.perf_counter() - epoch_start_time
+        active_mean_count = val_metrics['mean_l0']
+        active_total = int(hidden_dim)
+        row = {
+            'epoch': epoch,
+            'train_loss': train_loss_sum / max(1, train_rows),
+            'train_mse': train_mse_sum / max(1, train_rows),
+            'train_l1': train_l1_sum / max(1, train_rows),
+            'train_rows': train_rows,
+            **val_metrics,
+            'active_threshold': SAE_ACTIVE_THRESHOLD,
+            'active_mean_count': active_mean_count,
+            'active_total': active_total,
+            'active_ratio': active_mean_count / max(1, active_total),
+            'epoch_seconds': epoch_seconds,
+        }
+        history.append(row)
+        print(format_sae_epoch_log(row, hidden_dim=hidden_dim))
+    return sae, history
+
+
+def train_sae_auto(model, loader, val_token, token_stats, input_dim, hidden_dim, b_dec_init, max_tokens=None, expected_tokens=None, target_block=TARGET_BLOCK, token_scope=TOKEN_SCOPE, device=DEVICE, model_compile=MODEL_COMPILE, use_amp=SAE_USE_AMP, amp_dtype=SAE_AMP_DTYPE, check_finite=SAE_CHECK_FINITE):
+    token_count_for_decision = expected_tokens if expected_tokens is not None else max_tokens
+    mode = choose_token_source_mode(
+        requested_mode=TOKEN_SOURCE_MODE,
+        expected_tokens=token_count_for_decision,
+        input_dim=input_dim,
+        dtype=TOKEN_CACHE_DTYPE if TOKEN_CACHE_DTYPE is not None else torch.float32,
+    )
+    print(f"Token source mode selected: {mode}")
+    train_fn = train_sae_cached if mode == "cache" else train_sae_streaming
+    return train_fn(
+        model,
+        loader,
+        val_token,
+        token_stats,
+        input_dim,
+        hidden_dim,
+        b_dec_init,
+        max_tokens=max_tokens,
+        expected_tokens=expected_tokens,
+        target_block=target_block,
+        token_scope=token_scope,
+        device=device,
+        model_compile=model_compile,
+        use_amp=use_amp,
+        amp_dtype=amp_dtype,
+        check_finite=check_finite,
+    )
 
 
 def plot_sae_training_history(history, hidden_dim=None, active_threshold=SAE_ACTIVE_THRESHOLD, figsize=(12, 8)):
@@ -685,18 +972,20 @@ def plot_sae_training_history(history, hidden_dim=None, active_threshold=SAE_ACT
 @torch.no_grad()
 def evaluate_sae_tokens(sae:nn.Module, tokens_norm, batch_size=SAE_BATCH_SIZE, threshold=SAE_ACTIVE_THRESHOLD, device=DEVICE):
     sae.eval().to(device)
-    total_sse = total_cosine = total_l0 = total_rows = 0.0
+    total_sse = total_cosine = total_l0 = total_rows = total_elements = 0.0
     for start in tqdm(range(0, tokens_norm.shape[0], batch_size), leave=False, desc="Eval..."):
-        xb_cpu = tokens_norm[start:start + batch_size].float()
-        xb = xb_cpu.to(device)
+        xb = tokens_norm[start:start + batch_size].float().to(device, non_blocking=True)
         x_hat, z = sae(xb)
-        x_hat_cpu = x_hat.detach().cpu().float()
-        z_cpu = z.detach().cpu().float()
-        total_sse += float((xb_cpu - x_hat_cpu).pow(2).sum().item())
-        total_cosine += float(F.cosine_similarity(xb_cpu, x_hat_cpu, dim=1).sum().item())
-        total_l0 += float((z_cpu > threshold).float().sum(dim=1).sum().item())
-        total_rows += xb_cpu.shape[0]
-    mse = total_sse / max(1, tokens_norm.numel())
+
+        total_sse += float((xb - x_hat).square().sum().item())
+        total_cosine += float(F.cosine_similarity(xb, x_hat, dim=1).sum().item())
+        total_l0 += float((z > threshold).sum().item())
+        total_rows += xb.shape[0]
+        total_elements += xb.numel()
+
+        del xb, x_hat, z
+
+    mse = total_sse / max(1, total_elements)
     variance = float(tokens_norm.float().var(unbiased=False).item())
     return {
         'mse': mse,
@@ -734,7 +1023,7 @@ print(f'val tokens cached: {tuple(sae_val_tokens.shape)}')
 
 sae_input_dim = sae_token_stats['mean'].shape[1]
 sae_hidden_dim = int(sae_input_dim * EXPANSION)
-trained_sae, sae_history = train_sae_streaming(
+trained_sae, sae_history = train_sae_auto(
     vit_b,
     train_loader,
     sae_val_tokens,
@@ -744,6 +1033,10 @@ trained_sae, sae_history = train_sae_streaming(
     sae_b_dec_init,
     max_tokens=MAX_TRAIN_TOKENS,
     expected_tokens=sae_train_token_count,
+    model_compile=MODEL_COMPILE,
+    use_amp=SAE_USE_AMP,
+    amp_dtype=SAE_AMP_DTYPE,
+    check_finite=SAE_CHECK_FINITE,
 )
 sae_train_log_fig = plot_sae_training_history(sae_history, hidden_dim=trained_sae.hidden_dim)
 save_show_close(sae_train_log_fig, "sae_train_log")

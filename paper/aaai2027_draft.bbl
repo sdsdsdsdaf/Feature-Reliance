@@ -1,0 +1,80 @@
+\begin{thebibliography}{10}
+
+\bibitem{bau2017network}
+David Bau, Bolei Zhou, Aditya Khosla, Aude Oliva, and Antonio Torralba.
+\newblock Network dissection: Quantifying interpretability of deep visual
+  representations.
+\newblock In {\em Proceedings of the IEEE Conference on Computer Vision and
+  Pattern Recognition}, 2017.
+\newblock arXiv preprint first posted 19 Apr 2017.
+
+\bibitem{burgert2025feature}
+Tom Burgert, Oliver Stoll, Paolo Rota, and Beg{\"u}m Demir.
+\newblock {ImageNet}-trained {CNNs} are not biased towards texture: Revisiting
+  feature reliance through controlled suppression, 2025.
+\newblock arXiv preprint first posted 24 Sep 2025.
+
+\bibitem{flovik2025salve}
+Vegard Flovik.
+\newblock {SALVE}: Sparse autoencoder-latent vector editing for mechanistic
+  control of neural networks, 2025.
+\newblock arXiv preprint first posted 17 Dec 2025.
+
+\bibitem{geirhos2019imagenet}
+Robert Geirhos, Patricia Rubisch, Claudio Michaelis, Matthias Bethge, Felix~A.
+  Wichmann, and Wieland Brendel.
+\newblock {ImageNet}-trained {CNNs} are biased towards texture; increasing
+  shape bias improves accuracy and robustness.
+\newblock In {\em International Conference on Learning Representations}, 2019.
+\newblock OpenReview published 21 Dec 2018; arXiv:1811.12231 first posted 29
+  Nov 2018.
+
+\bibitem{gulrajani2021search}
+Ishaan Gulrajani and David Lopez-Paz.
+\newblock In search of lost domain generalization.
+\newblock In {\em International Conference on Learning Representations}, 2021.
+\newblock OpenReview published 12 Jan 2021; arXiv:2007.01434 first posted 2 Jul
+  2020.
+
+\bibitem{hendrycks2021many}
+Dan Hendrycks, Steven Basart, Norman Mu, Saurav Kadavath, Frank Wang, Evan
+  Dorundo, Rahul Desai, Tyler Zhu, Samyak Parajuli, Mike Guo, Dawn Song, Jacob
+  Steinhardt, and Justin Gilmer.
+\newblock The many faces of robustness: A critical analysis of
+  out-of-distribution generalization.
+\newblock In {\em Proceedings of the IEEE/CVF International Conference on
+  Computer Vision}, 2021.
+\newblock arXiv preprint first posted 29 Jun 2020.
+
+\bibitem{cunningham2024sparse}
+Robert Huben, Hoagy Cunningham, Logan~Riggs Smith, Aidan Ewart, and Lee
+  Sharkey.
+\newblock Sparse autoencoders find highly interpretable features in language
+  models.
+\newblock In {\em International Conference on Learning Representations}, 2024.
+\newblock OpenReview published 16 Jan 2024; arXiv:2309.08600 first posted 15
+  Sep 2023.
+
+\bibitem{kornblith2019similarity}
+Simon Kornblith, Mohammad Norouzi, Honglak Lee, and Geoffrey Hinton.
+\newblock Similarity of neural network representations revisited.
+\newblock In Kamalika Chaudhuri and Ruslan Salakhutdinov, editors, {\em
+  Proceedings of the 36th International Conference on Machine Learning},
+  volume~97 of {\em Proceedings of Machine Learning Research}, pages
+  3519--3529. PMLR, 09--15 Jun 2019.
+\newblock PMLR proceedings published for ICML 2019.
+
+\bibitem{kowal2024vcc}
+Matthew Kowal, Richard~P. Wildes, and Konstantinos~G. Derpanis.
+\newblock Visual concept connectome ({VCC}): Open world concept discovery and
+  their interlayer connections in deep models, 2024.
+\newblock arXiv preprint first posted 2 Apr 2024.
+
+\bibitem{stevens2025saev}
+Samuel Stevens, Wei-Lun Chao, Tanya Berger-Wolf, and Yu~Su.
+\newblock Sparse autoencoders for scientifically rigorous interpretation of
+  vision models, 2025.
+\newblock arXiv preprint first posted 10 Feb 2025; project page:
+  https://osu-nlp-group.github.io/SAE-V.
+
+\end{thebibliography}

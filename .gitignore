@@ -6,6 +6,7 @@ wandb/*
 outputs/*
 .agents/*
 data
+.vscode
 
 # 2. MetaData 폴더는 제외 (살림)
 !Cache/MetaData/
