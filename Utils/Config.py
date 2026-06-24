@@ -317,3 +317,117 @@ class TrainConfig:
             
         if self.adpator_config is None:
             self.adpator_config = AdaptorConfig()
+
+
+# ------ SAE Validation / Grid Search Config ------
+@dataclass
+class SAEBackboneHookConfig:
+    target_block: int = 10
+    token_scope: str = "all"
+
+
+@dataclass
+class SAETokenConfig:
+    max_train_tokens: Optional[int] = 1_000_000
+    max_val_tokens: Optional[int] = None
+    cache_dtype: str = "float16"
+    normalize_chunk_size: int = 65_536
+    source_mode: str = "auto"  # "auto", "cache", "stream"
+    cache_max_cpu_gib: float = 8.0
+    cache_build_peak_factor: float = 3.0
+    cache_min_free_cpu_gib_after_build: float = 4.0
+    cache_num_workers: int = 0
+
+
+@dataclass
+class SAEConfig:
+    expansion: int = 64
+    dec_bias_mode: str = "zero"  # "zero", "mean", "geom"
+    active_threshold: float = 0.2
+    l1_reg: float = 1e-4
+    batch_size: int = 7096
+    bias_init_geom_max_iter: int = 100
+    bias_init_geom_tol: float = 1e-5
+    model_compile: bool = True
+    amp_dtype: str = "bfloat16"
+    check_finite: bool = True
+    matmul_precision: str = "high"
+
+
+@dataclass
+class SAEEarlyStoppingConfig:
+    patience: Optional[int] = 5
+    eps: float = 1e-5
+    metric_name: str = "val_nmse"
+    save_verbose: bool = False
+
+
+@dataclass
+class SAEOutputConfig:
+    root_dir: str = "outputs/SAE_validation"
+    grid_dir_name: str = "grid_search"
+    plot_display_seconds: int = 0
+    plot_dpi: int = 200
+
+
+@dataclass
+class SAEGridSearchConfig:
+    enabled: bool = True
+    max_trials: Optional[int] = None
+    metric: str = "val_nmse"
+    mode: Literal["min", "max"] = "min"
+    space: Dict[str, List[Any]] = field(default_factory=lambda: {
+        "sae.expansion": [16, 32, 64],
+        "sae.l1_reg": [3e-5, 1e-4, 3e-4],
+        "optim_config.lr": [5e-5, 1e-4],
+        "sae.dec_bias_mode": ["zero", "mean"],
+        "sae.active_threshold": [0.1, 0.2],
+    })
+
+
+@dataclass
+class SAEExperimentConfig:
+    model_spec: Optional[ModelSpec] = None
+    data_config: DataConfig = field(default_factory=lambda: DataConfig(
+        batch_size=64,
+        num_workers=0,
+        pin_memory=True,
+        shuffle=False,
+    ))
+    train_dataset_spec: DatasetSpec = field(default_factory=lambda: DatasetSpec(
+        name="imagenette_train",
+        dataset_type="imagenette",
+        root="data",
+        split="train",
+        num_classes=10,
+    ))
+    val_dataset_spec: DatasetSpec = field(default_factory=lambda: DatasetSpec(
+        name="imagenette_val",
+        dataset_type="imagenette",
+        root="data",
+        split="val",
+        num_classes=10,
+    ))
+    extraction_config: ExtractionConfig = field(default_factory=lambda: ExtractionConfig(
+        root_dir="Cache",
+        device="cuda",
+        dtype="float16",
+    ))
+    optim_config: OptimConfig = field(default_factory=lambda: OptimConfig(
+        epochs=350,
+        lr=1e-4,
+        weight_decay=0.0,
+        use_amp=True,
+    ))
+    logging_config: LoggingConfig = field(default_factory=LoggingConfig)
+    hook: SAEBackboneHookConfig = field(default_factory=SAEBackboneHookConfig)
+    token: SAETokenConfig = field(default_factory=SAETokenConfig)
+    sae: SAEConfig = field(default_factory=SAEConfig)
+    early_stopping: SAEEarlyStoppingConfig = field(default_factory=SAEEarlyStoppingConfig)
+    output: SAEOutputConfig = field(default_factory=SAEOutputConfig)
+    grid: SAEGridSearchConfig = field(default_factory=SAEGridSearchConfig)
+
+    def validate(self):
+        if self.hook.target_block != 11 and self.hook.token_scope.lower() != "patch":
+            self.hook.token_scope = "patch"
+        return self
