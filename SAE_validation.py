@@ -79,7 +79,7 @@ MATMUL_PRECISION = "high"
 # Early stopping
 EARLY_STOPPING_PATIENCE = 30
 EARLY_STOPPING_EPS = 5e-5
-EARLY_STOPPING_VERBOSE = True
+EARLY_STOPPING_VERBOSE = False
 
 # Grid search
 RUN_GRID_SEARCH = True
@@ -408,7 +408,7 @@ def select_best_trial(summaries, metric, mode):
     return sorted(completed, key=lambda row: row[metric], reverse=reverse)[0]
 
 
-def run_sae_grid_search(base_config):
+def run_sae_grid_search(base_config: SAEExperimentConfig):
     base_config = copy.deepcopy(base_config).validate()
     root_dir = Path(base_config.output.root_dir) / base_config.output.grid_dir_name
     root_dir.mkdir(parents=True, exist_ok=True)
@@ -420,6 +420,11 @@ def run_sae_grid_search(base_config):
 
     total_trials = len(grid_items)
     for trial_idx, overrides in enumerate(grid_items):
+        trial_dir = root_dir / f"trial_{trial_idx:04d}"
+        if trial_dir.exists():
+            print(f"Trial {trial_idx + 1}/{total_trials} already exists, skipping...")
+            continue
+
         trial_start_time = time.perf_counter()
         trial_id = f"trial_{trial_idx:04d}"
         trial_dir = root_dir / trial_id
