@@ -1,8 +1,5 @@
-\documentclass[letterpaper]{article}
-\usepackage{aaai2027}
-\usepackage{times}
-\usepackage{helvet}
-\usepackage{courier}
+\documentclass{article}
+\usepackage{iclr2026_conference,times}
 \usepackage[hyphens]{url}
 \usepackage{graphicx}
 \usepackage{amsmath}
@@ -12,15 +9,10 @@
 \usepackage{algorithmic}
 \urlstyle{rm}
 \def\UrlFont{\rm}
-\frenchspacing
-\setlength{\pdfpagewidth}{8.5in}
-\setlength{\pdfpageheight}{11in}
 
 \title{SAE-Latent Reservoir Routing for Prolonged Test-Time Adaptation}
 \author{
-    Anonymous Authors
-}
-\affiliations{
+    Anonymous Authors\\
     Anonymous Institution
 }
 
@@ -59,13 +51,13 @@ Style statistics are widely used as domain descriptors because many corruptions,
 \paragraph{Sparse latent representations in vision.}
 Sparse autoencoders decompose dense activations into sparse feature dictionaries \cite{bricken2023monosemanticity,gao2024scaling}. Vision extensions such as PatchSAE train SAEs on ViT patch tokens and obtain interpretable visual concepts with spatial attributions \cite{lim2025patchsae}. CLIP decomposition work also shows that patch, layer, and attention-head contributions can be associated with diverse visual properties \cite{gandelsman2024clipdecomposition}. These results motivate using sparse latents as routing descriptors for adaptation.
 
-\section{Method}
+\section{SAE-Latent Reservoir Routing}
 
-\subsection{Problem Setup}
+\subsection{SAE Descriptor Architecture and Extraction}
 
 We observe an unlabeled test stream $\{x_t\}_{t=1}^{T}$ whose domain may evolve, recur, or mix. The base classifier is $f_{\theta_0}$, and the reservoir contains $K$ specialists $\{f_{\theta_k}\}_{k=1}^{K}$. Each specialist is initialized from the source model or from a previously adapted checkpoint. A frozen SAE encoder $E_\phi$ is trained before test-time adaptation on internal representations of a vision backbone. At time $t$, the goal is to choose a specialist $a_t$, predict $f_{\theta_{a_t}}(x_t)$, and update only $\theta_{a_t}$ using unlabeled adaptation losses.
 
-\subsection{SAE Descriptor Extraction}
+\paragraph{Descriptor extraction.}
 
 For a sample $x_t$, we extract a target-layer representation $h_\ell(x_t)$. In the current codebase, the SAE pipeline supports ViT-B/16 block-token outputs collected by hooks, with token scope set to class token, patch tokens, or all tokens. The Vanilla L1 SAE computes
 \begin{equation}
@@ -79,7 +71,11 @@ r_{t,k}^{\mathrm{freq}} &= \frac{1}{N}\sum_i \mathbf{1}[z_{t,i,k}>\tau].
 \end{align}
 The frequency descriptor is especially aligned with the SAE validation code, which tracks active latent counts using a threshold $\tau$.
 
-\subsection{Reservoir Routing}
+\subsection{Analysis Method and Evaluation Setup}
+
+Patch-, image-, class-, and dataset-level activation analysis is used to validate whether the descriptor captures meaningful domain tendency. Dataset-level activation can represent a stream segment or reservoir prototype, and top-$k$ overlap shows which sparse features cause samples to be routed together.
+
+\subsection{SAE Latents as Domain Routing Signals}
 
 Each reservoir specialist $k$ maintains a prototype $c_k$ in SAE-latent descriptor space. Given descriptor $r_t$, routing selects
 \begin{equation}
@@ -91,7 +87,9 @@ d_{\mathrm{top}}(r,c) = -\frac{|\mathrm{Top}_q(r)\cap \mathrm{Top}_q(c)|}{q}.
 \end{equation}
 If the minimum distance is above a novelty threshold, a new specialist is initialized when reservoir capacity allows. Otherwise, the least useful specialist can be merged, replaced, or frozen depending on the memory policy.
 
-\subsection{Specialist Update}
+\section{Analyzing Test-Time Adaptation Behavior via SAE Routing}
+
+\subsection{Impact of SAE-Latent Routing on Adaptation}
 
 After routing, only the selected specialist is adapted. The default update can follow standard TTA:
 \begin{equation}
@@ -100,7 +98,7 @@ After routing, only the selected specialist is adapted. The default update can f
 \end{equation}
 The repository also supports feature-consistency objectives through clean and perturbed views. For a clean view $x$ and perturbed view $\tilde{x}$, the loss combines clean cross-entropy or pseudo-label loss, perturbed prediction loss, and feature consistency between anchor and perturbed features. When labels are unavailable, the same structure can use confident pseudo-labels or entropy filtering. Near-identity adaptor modules can be inserted into the last ResNet or ViT blocks, so the update modifies a small set of parameters rather than the whole backbone.
 
-\subsection{Reservoir Maintenance}
+\subsubsection{Analysis Method and Experiment Setup}
 
 After adaptation, the selected prototype is updated with an exponential moving average:
 \begin{equation}
@@ -124,22 +122,32 @@ A bounded queue can store recent descriptors for each specialist. The queue supp
 \end{algorithmic}
 \end{algorithm}
 
-\subsection{Comparison to ReservoirTTA}
+\paragraph{Comparison protocol.}
 
 The main comparison replaces only the routing descriptor: ReservoirTTA uses StyleVec, while our variant uses SAE-latent descriptors. This controlled comparison preserves the reservoir mechanism and isolates whether model-internal sparse latents improve routing. Additional baselines include single-model TTA, random specialist routing, oracle domain routing, and no-adaptation inference. The expected datasets are ImageNet-C for corruption streams, ImageNet-R for natural rendition shift, and the repository's synthetic perturbation streams using grayscale, bilateral filtering, patch shuffling, patch rotation, and local warping.
 
-\subsection{Evaluation}
+\subsubsection{Key Findings}
 
-We evaluate online accuracy, cumulative error, adaptation stability over recurrences, routing purity, and specialist reuse. We also report resource metrics: number of specialists, trainable parameters, memory cost, and inference time. Because SAE-latent routing adds encoding and similarity computation, the final analysis should include a cost-performance plot. The interpretability analysis will compare each specialist's prototype latents and identify which sparse features trigger routing to that specialist.
+SAE-latent routing is expected to improve domains where the classifier's internal feature shift differs from simple style statistics. The reservoir structure should improve stability compared with a single continuously adapted model, especially when domains recur.
 
-\section{Expected Results and Discussion Themes}
+\subsection{Understanding Reservoir Adaptation Mechanisms}
 
-We expect SAE-latent routing to improve domains where the classifier's internal feature shift differs from simple style statistics. For example, two corruptions may share low-level style changes but activate different sparse semantic or local-shape latents; the proposed router should be able to separate them if these latent differences are stable. Conversely, if the domain stream is almost entirely explained by low-level style, StyleVec may remain competitive and cheaper.
+\subsubsection{Analysis Method and Experiment Setup}
 
-The reservoir structure should improve stability compared with a single continuously adapted model, especially when domains recur. The main risk is efficiency: multiple specialists increase memory and the SAE adds an extra forward path. A second risk is interpretability dilution. Although SAE latents are more interpretable than dense features, the final behavior depends on both routing and specialist adaptation. The discussion will therefore separate routing interpretability, specialist behavior, and end-to-end accuracy.
+We evaluate online accuracy, cumulative error, adaptation stability over recurrences, routing purity, and specialist reuse. We also report resource metrics: number of specialists, trainable parameters, memory cost, and inference time. The interpretability analysis will compare each specialist's prototype latents and identify which sparse features trigger routing to that specialist.
 
-Future experiments will test JumpReLU and Top-K SAE variants, lightweight latent pooling, prototype pruning, and hybrid routing that combines StyleVec with SAE latents. The most promising outcome is not just higher accuracy, but a reservoir whose specialists correspond to recurring sparse feature-reliance profiles.
+\subsubsection{Key Findings}
+
+The expected finding is a reservoir whose specialists correspond to recurring sparse feature-reliance profiles. If routing and adaptation become hard to interpret jointly, hybrid StyleVec + SAE routing or lightweight latent pooling will be considered.
+
+\section{Discussion}
+
+The main risk is efficiency: multiple specialists increase memory and the SAE adds an extra forward path. A second risk is interpretability dilution. Although SAE latents are more interpretable than dense features, the final behavior depends on both routing and specialist adaptation. Future experiments will test JumpReLU and Top-K SAE variants, lightweight latent pooling, prototype pruning, and hybrid routing that combines StyleVec with SAE latents.
+
+\section{Conclusion}
+
+This paper proposes model-internal SAE latent descriptors for reservoir routing in prolonged TTA. The expected contribution is to show that sparse latent prototypes can provide both stable routing under recurring domains and an interpretable view of specialist behavior.
 
 \bibliography{references}
-\bibliographystyle{aaai2027}
+\bibliographystyle{iclr2026_conference}
 \end{document}

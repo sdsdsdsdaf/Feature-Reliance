@@ -1,8 +1,5 @@
-\documentclass[letterpaper]{article}
-\usepackage{aaai2027}
-\usepackage{times}
-\usepackage{helvet}
-\usepackage{courier}
+\documentclass{article}
+\usepackage{iclr2026_conference,times}
 \usepackage[hyphens]{url}
 \usepackage{graphicx}
 \usepackage{amsmath}
@@ -12,15 +9,10 @@
 \usepackage{algorithmic}
 \urlstyle{rm}
 \def\UrlFont{\rm}
-\frenchspacing
-\setlength{\pdfpagewidth}{8.5in}
-\setlength{\pdfpageheight}{11in}
 
 \title{Sparse Latent Feature Reliance for Domain Adaptation}
 \author{
-    Anonymous Authors
-}
-\affiliations{
+    Anonymous Authors\\
     Anonymous Institution
 }
 
@@ -59,15 +51,15 @@ Sparse autoencoders have become a standard tool for decomposing dense neural act
 \paragraph{Representation similarity and perturbation metrics.}
 Our evaluation follows the repository's existing metrics. Accuracy and relative accuracy quantify behavioral degradation, Jensen-Shannon divergence compares output distributions, and centered kernel alignment (CKA) compares internal representations \cite{kornblith2019cka}. Perturbation validation metrics such as texture score and shape score are used as sanity checks for the input transformations. The new SAE metrics add reconstruction normalized MSE, cosine reconstruction, mean active latent count, latent activation frequency, and domain-sensitive activation divergence.
 
-\section{Method}
+\section{Sparse Latent Feature Reliance}
 
-\subsection{Problem Setup}
+\subsection{SAE Architecture and Training Objectives}
 
 Let $f_\theta$ be a pretrained image classifier and let $\mathcal{D}=\{D_0,D_1,\ldots,D_m\}$ denote a set of domains. $D_0$ is an in-distribution source such as ImageNet validation, while $D_i$ may be a natural OOD domain such as ImageNet-R or a synthetic perturbation domain. For an input $x$, the classifier produces logits $y=f_\theta(x)$. We extract an internal representation $h_\ell(x)$ from a target layer or ViT block $\ell$. For a ViT, $h_\ell(x)\in\mathbb{R}^{N\times d}$ is a set of class and patch tokens.
 
 We train an SAE encoder $E_\phi$ and decoder $G_\psi$ so that each token $h$ is mapped to a sparse latent vector $z=E_\phi(h)\in\mathbb{R}^{K}_{\ge 0}$ and reconstructed as $\hat{h}=G_\psi(z)$. Feature reliance for a domain is then represented as statistics over $z$ rather than as a single accuracy drop under a named perturbation.
 
-\subsection{Stage 1: SAE Training}
+\paragraph{SAE training.}
 
 The current implementation trains a Vanilla L1 SAE on ViT-B/16 block outputs. Tokens are collected with a forward hook from a target transformer block, currently block 10 by default, and the token scope can be \texttt{cls}, \texttt{patch}, or \texttt{all}. The collected token stream is normalized by a streaming mean and standard deviation. The SAE uses a ReLU encoder and a linear decoder:
 \begin{align}
@@ -78,11 +70,11 @@ The decoder rows are normalized to unit norm after optimization steps, and the g
 \begin{equation}
 \mathcal{L}_{\mathrm{SAE}} =
 \mathbb{E}_{h}\left[\lVert h-\hat{h}\rVert_2^2\right]
-\lambda_{\mathrm{L1}}\mathbb{E}_{h}\left[\lVert z\rVert_1\right].
++\lambda_{\mathrm{L1}}\mathbb{E}_{h}\left[\lVert z\rVert_1\right].
 \end{equation}
 The validation script supports cached or streaming token sources, mixed precision, early stopping on validation normalized MSE, and a grid over expansion factor, L1 strength, learning rate, decoder-bias initialization, and active-threshold values. In the current configuration, the expansion factor is searched over $\{16,32,64\}$, L1 regularization over $\{3\times 10^{-5},10^{-4},3\times 10^{-4}\}$, and the active threshold over $\{0.1,0.2\}$.
 
-\subsection{Stage 2: Domain-Sensitive Latent Discovery}
+\subsection{Analysis Method and Evaluation Setup}
 
 After training, the SAE is frozen and used as a common encoder for every domain. For each domain $D$, we compute latent activation frequency and activation magnitude:
 \begin{align}
@@ -97,7 +89,17 @@ s_k(D_i;D_0)=
 \end{equation}
 Latents with low scores across all domains are treated as domain-invariant; latents with high scores for a specific shift are treated as shift-sensitive. For image-level analysis, token activations are pooled by mean activation, maximum activation, or frequency of active patches.
 
-\subsection{Stage 3: Latent Intervention and Adaptation}
+We analyze SAE latents at multiple levels. Patch-level activation shows which image regions activate a latent. Image-level activation gives a sparse feature profile for a single image. Class-level activation identifies latents that repeatedly appear for the same class. Dataset- or domain-level activation compares ImageNet, ImageNet-R, and synthetic perturbation domains in one latent coordinate system. We also use top-$k$ masking to test whether frequently activated latents are important for classification, comparing on top-$k$, off top-$k$, random-$k$, and class- or domain-level top-$k$ selections.
+
+Behavioral metrics include accuracy, relative accuracy, accuracy drop against clean data, and intervention gain. Representational metrics include Jensen-Shannon divergence between clean and shifted logits and CKA between clean and shifted representations. SAE metrics include validation normalized MSE, cosine reconstruction, mean active latent count, activation frequency, and domain-sensitive score.
+
+\subsection{SAE Discovers Domain-Sensitive Visual Concepts}
+
+The domain-sensitive latent scores separate invariant latents from shift-sensitive latents. ImageNet-R is expected to activate style- or rendition-sensitive latent clusters, while synthetic perturbations may activate or suppress latents related to local texture, patch layout, color, or shape-like evidence. A useful SAE profile should show that some latents remain stable across ImageNet and shifted domains, while others change frequency or magnitude consistently under specific perturbations.
+
+\section{Analyzing Domain Adaptation Behavior via SAE}
+
+\subsection{Impact of SAE Latents on Classification}
 
 Given a set of shift-sensitive latents $\mathcal{S}$, we test whether they are merely diagnostic or causally useful for adaptation. The simplest intervention modifies the sparse vector before decoding:
 \begin{equation}
@@ -109,16 +111,34 @@ z_k & \text{otherwise},
 \end{equation}
 where $\gamma_k$ can suppress or amplify a latent. The modified representation $\hat{h}'=G_\psi(z')$ is then injected at the corresponding layer or used to define a feature-consistency target. A second implementation path follows the repository's adaptor code: near-identity adaptor modules are inserted into the last ResNet or ViT blocks, and are trained with clean and perturbed classification losses plus feature or KL consistency. The SAE latent score can select which perturbation-sensitive features to preserve or attenuate.
 
-\subsection{Evaluation}
+\subsubsection{Analysis Method and Experiment Setup}
 
-We evaluate behavioral, representational, and sparse-latent metrics. Behavioral metrics include accuracy, relative accuracy, accuracy drop against clean data, and intervention gain. Representational metrics include Jensen-Shannon divergence between clean and shifted logits and CKA between clean and shifted representations. SAE metrics include validation normalized MSE, cosine reconstruction, mean active latent count, activation frequency, and domain-sensitive score. The expected experimental table will compare: clean baseline, input-perturbation feature reliance, SAE latent profiling without intervention, SAE latent reweighting, and adaptor-based intervention.
+The main datasets are ImageNet validation, an ImageNet-200 subset aligned with ImageNet-R classes, and ImageNet-R. The main models are ResNet50 pretrained on ImageNet-1K and ViT-B/16 pretrained or augmented on ImageNet-1K. Synthetic perturbations include original, grayscale, bilateral filtering, patch shuffling, patch rotation, and local warping. The expected experimental table will compare clean baseline, input-perturbation feature reliance, SAE latent profiling without intervention, SAE latent reweighting, and adaptor-based intervention.
 
-\section{Expected Results and Discussion Themes}
+\subsubsection{Key Findings}
 
-We expect SAE latent profiles to reveal domain differences that are hidden by coarse perturbation labels. For example, ImageNet-R is a style/rendition shift, but its effect may not be reducible to texture alone; a subset of latents may respond to edge abstraction, local part layout, or semantic rendering style. A successful profile would show that some latents remain stable across ImageNet and ImageNet-R, while others change frequency or magnitude consistently under specific perturbations.
+SAE latent profiles should reveal domain differences that are hidden by coarse perturbation labels. Latent intervention is not expected to help every shift, but it should identify which sparse features are associated with performance degradation or recovery.
 
-We also expect the intervention results to be selective rather than uniformly positive. Suppressing a shift-sensitive latent may help when that latent tracks a harmful shortcut, but hurt when it tracks a useful domain-specific cue. Therefore, the main contribution is not simply an accuracy gain; it is a method for connecting domain performance changes to sparse, inspectable internal features. Planned extensions will compare Vanilla L1 SAE with JumpReLU and Top-K SAEs, focusing on the trade-off between reconstruction fidelity, sparsity, interpretability, and adaptation performance.
+\subsection{Understanding Adaptation Mechanisms}
+
+We compare clean/OOD or before/after adaptation latent profiles in a shared SAE space. Group-level activation scatter plots separate stable-high, high-to-low, and low-to-high latents. This tests whether adaptation activates new useful concepts, suppresses harmful shift-sensitive concepts, or mainly remaps already active concepts to better predictions.
+
+\subsubsection{Analysis Method and Experiment Setup}
+
+Class-level and dataset-level SAE activations are computed before and after adaptation or intervention. Latents are grouped by whether they stay highly active, decrease after adaptation, or increase after adaptation. These groups are then compared with accuracy change, logit divergence, and representation CKA.
+
+\subsubsection{Key Findings}
+
+The expected finding is that adaptation gains come from selective suppression or reweighting of sparse visual concepts rather than uniformly discovering new features. If shift-sensitive latents align with OOD failures, SAE analysis can serve as an interpretable adaptation signal.
+
+\section{Discussion}
+
+Planned extensions will compare Vanilla L1 SAE with JumpReLU and Top-K SAEs, focusing on the trade-off between reconstruction fidelity, sparsity, interpretability, and adaptation performance. The goal of latent intervention is not only to improve accuracy, but also to explain which internal feature reliance patterns change under domain shift.
+
+\section{Conclusion}
+
+This paper reframes domain feature reliance as a distribution over sparse internal latents rather than accuracy degradation under named perturbations. The expected contribution is to identify domain-sensitive latents, connect them to OOD performance changes, and use them as interpretable adaptation signals.
 
 \bibliography{references}
-\bibliographystyle{aaai2027}
+\bibliographystyle{iclr2026_conference}
 \end{document}
