@@ -1,0 +1,124 @@
+\documentclass[letterpaper]{article}
+\usepackage{aaai2027}
+\usepackage{times}
+\usepackage{helvet}
+\usepackage{courier}
+\usepackage[hyphens]{url}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\urlstyle{rm}
+\def\UrlFont{\rm}
+\frenchspacing
+\setlength{\pdfpagewidth}{8.5in}
+\setlength{\pdfpageheight}{11in}
+
+\title{Sparse Latent Feature Reliance for Domain Adaptation}
+\author{
+    Anonymous Authors
+}
+\affiliations{
+    Anonymous Institution
+}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Feature reliance analysis asks which visual evidence a classifier uses when it predicts under distribution shift. Recent work revisits the texture-bias hypothesis by suppressing hand-defined cues such as color, texture, and shape, and shows that reliance profiles can vary across data domains. However, input perturbations are an indirect instrument: a perturbation intended to remove one cue can also alter other visual factors, and the taxonomy of color, texture, and shape is too coarse to cover the diversity of cues used by modern vision models. We propose to replace hand-defined cue axes with sparse latent features learned from internal representations. A single sparse autoencoder (SAE) is trained on Vision Transformer block tokens and then reused as a common feature basis across ImageNet, ImageNet-R, and synthetic perturbation domains. We profile each domain by latent activation frequency and magnitude, identify domain-invariant and shift-sensitive latents, and intervene on the latter by reweighting their sparse activations or decoder contributions. The current implementation uses a Vanilla L1 SAE with a ReLU encoder and a linear decoder; future variants will evaluate JumpReLU and Top-K SAEs. Expected experiments will test whether SAE latent profiles expose domain-specific reliance patterns that are hidden by input perturbation, and whether latent intervention yields interpretable domain adaptation gains.
+\end{abstract}
+
+\section{Introduction}
+
+ImageNet-pretrained classifiers are accurate on in-distribution validation data, but their behavior can change sharply when the test domain changes. This observation is not only a robustness issue; it suggests that a model's prediction may be supported by different visual evidence in different domains. The classic debate around texture and shape bias illustrates the point. Geirhos et al. argued that ImageNet-trained CNNs can prefer texture over global shape in cue-conflict images \cite{geirhos2019imagenet}, while later feature-reliance work revisits this conclusion by suppressing shape, texture, and color cues rather than forcing a conflict \cite{imagenetnottexture2025}. The motivating insight for this paper is that feature reliance is a domain-dependent profile rather than a fixed property of an architecture.
+
+The current repository reproduces this motivation with input perturbations including grayscale conversion, bilateral filtering, patch shuffling, patch rotation, and local warping. These interventions are useful because they are simple and model-agnostic. Yet they are also blunt. A perturbation designed as a texture intervention can change shape-related metrics, while a shape perturbation can also alter local texture statistics and semantic context. In the current pilot analysis, bilateral filtering reduces both the measured texture score and shape score rather than isolating texture alone, and local warping causes large changes in accuracy, representation similarity, and shape-related validation metrics. This supports the concern that input perturbation does not perfectly factor visual cues.
+
+The second limitation is conceptual. Color, texture, and shape are useful coarse categories, but visual recognition also depends on locality, part configuration, object pose, background, material, scale, context, and semantic attributes. Recent analyses of CLIP and vision transformers show that internal components can encode properties such as object identity, color, location, spatial patch contributions, and other text-labelable factors \cite{gandelsman2024clipdecomposition}. PatchSAE extends this direction by training sparse autoencoders on CLIP vision-transformer representations to obtain patch-wise concepts such as shape, color, and semantics \cite{lim2025patchsae}. These works suggest that a model-internal feature basis may be a better unit of analysis than a small set of externally defined perturbations.
+
+We therefore introduce a sparse-latent feature reliance framework. We train one SAE on intermediate vision representations and use its latent vector as a shared coordinate system for multiple domains. Rather than asking whether a model is texture-biased, we ask which sparse latents are repeatedly active in each domain, which latents respond specifically to a domain shift, and whether changing those latents changes downstream predictions. The resulting profile is intended to be more granular than color, texture, and shape, while still retaining interpretability through sparse activation and patch-level attribution.
+
+This paper studies three questions. First, can a single SAE trained on vision tokens provide a stable representation basis across ImageNet, ImageNet-R, and synthetic perturbation domains? Second, can activation statistics separate domain-invariant latents from domain-sensitive latents? Third, can latent reweighting or decoder-side intervention improve domain adaptation while preserving a readable explanation of what changed?
+
+Our contributions are as follows. (1) We formulate feature reliance as a distribution over sparse internal latents rather than as accuracy degradation under a fixed perturbation set. (2) We provide a practical SAE training and profiling pipeline for ViT block tokens using the current codebase. (3) We define domain-sensitive latent scores and an intervention protocol for adaptation. (4) We outline an evaluation suite combining accuracy drop, relative accuracy, Jensen-Shannon divergence of logits, CKA of representations, SAE reconstruction quality, latent sparsity, and intervention gain.
+
+\section{Related Work}
+
+\paragraph{Feature reliance and shortcut learning.}
+The texture-shape debate has been central to understanding visual shortcuts. Geirhos et al. showed that ImageNet-trained CNNs often classify cue-conflict images by texture rather than by shape, and that Stylized ImageNet can increase shape bias and robustness \cite{geirhos2019imagenet}. Follow-up work argues that the conclusion depends on the evaluation protocol and proposes cue suppression as a domain-agnostic feature-reliance measurement \cite{imagenetnottexture2025}. Our work follows the latter motivation but questions whether input-level suppression can cleanly isolate the model's internal visual evidence.
+
+\paragraph{Domain shift and robustness benchmarks.}
+Natural and synthetic distribution shifts are commonly evaluated with datasets such as ImageNet-R \cite{kim2021imagenetr} and ImageNet-C \cite{hendrycks2019imagenetc}. These benchmarks expose failures under rendition, style, and corruption shifts. Our current code uses ImageNet validation, an ImageNet-200 subset aligned to ImageNet-R classes, and ImageNet-R, together with controlled perturbations that approximate color, texture, and shape manipulations. The proposed SAE profile is intended to explain \emph{why} the same model produces different robustness patterns across these domains.
+
+\paragraph{Sparse autoencoders for representation analysis.}
+Sparse autoencoders have become a standard tool for decomposing dense neural activations into sparse, more interpretable features in mechanistic interpretability \cite{bricken2023monosemanticity,gao2024scaling}. Recent vision work extends this idea to patch-level transformer features. PatchSAE learns sparse concepts from CLIP ViT tokens and reports interpretable, patch-wise visual concepts that can be tracked through adaptation \cite{lim2025patchsae}. Our work borrows this representation-analysis tool but uses it for domain-level feature reliance and adaptation intervention.
+
+\paragraph{Representation similarity and perturbation metrics.}
+Our evaluation follows the repository's existing metrics. Accuracy and relative accuracy quantify behavioral degradation, Jensen-Shannon divergence compares output distributions, and centered kernel alignment (CKA) compares internal representations \cite{kornblith2019cka}. Perturbation validation metrics such as texture score and shape score are used as sanity checks for the input transformations. The new SAE metrics add reconstruction normalized MSE, cosine reconstruction, mean active latent count, latent activation frequency, and domain-sensitive activation divergence.
+
+\section{Method}
+
+\subsection{Problem Setup}
+
+Let $f_\theta$ be a pretrained image classifier and let $\mathcal{D}=\{D_0,D_1,\ldots,D_m\}$ denote a set of domains. $D_0$ is an in-distribution source such as ImageNet validation, while $D_i$ may be a natural OOD domain such as ImageNet-R or a synthetic perturbation domain. For an input $x$, the classifier produces logits $y=f_\theta(x)$. We extract an internal representation $h_\ell(x)$ from a target layer or ViT block $\ell$. For a ViT, $h_\ell(x)\in\mathbb{R}^{N\times d}$ is a set of class and patch tokens.
+
+We train an SAE encoder $E_\phi$ and decoder $G_\psi$ so that each token $h$ is mapped to a sparse latent vector $z=E_\phi(h)\in\mathbb{R}^{K}_{\ge 0}$ and reconstructed as $\hat{h}=G_\psi(z)$. Feature reliance for a domain is then represented as statistics over $z$ rather than as a single accuracy drop under a named perturbation.
+
+\subsection{Stage 1: SAE Training}
+
+The current implementation trains a Vanilla L1 SAE on ViT-B/16 block outputs. Tokens are collected with a forward hook from a target transformer block, currently block 10 by default, and the token scope can be \texttt{cls}, \texttt{patch}, or \texttt{all}. The collected token stream is normalized by a streaming mean and standard deviation. The SAE uses a ReLU encoder and a linear decoder:
+\begin{align}
+z &= \mathrm{ReLU}((h-b_{\mathrm{dec}})W_{\mathrm{enc}} + b_{\mathrm{enc}}), \\
+\hat{h} &= zW_{\mathrm{dec}} + b_{\mathrm{dec}}.
+\end{align}
+The decoder rows are normalized to unit norm after optimization steps, and the gradient component parallel to decoder directions is removed, following common SAE training practice. The objective is
+\begin{equation}
+\mathcal{L}_{\mathrm{SAE}} =
+\mathbb{E}_{h}\left[\lVert h-\hat{h}\rVert_2^2\right]
+\lambda_{\mathrm{L1}}\mathbb{E}_{h}\left[\lVert z\rVert_1\right].
+\end{equation}
+The validation script supports cached or streaming token sources, mixed precision, early stopping on validation normalized MSE, and a grid over expansion factor, L1 strength, learning rate, decoder-bias initialization, and active-threshold values. In the current configuration, the expansion factor is searched over $\{16,32,64\}$, L1 regularization over $\{3\times 10^{-5},10^{-4},3\times 10^{-4}\}$, and the active threshold over $\{0.1,0.2\}$.
+
+\subsection{Stage 2: Domain-Sensitive Latent Discovery}
+
+After training, the SAE is frozen and used as a common encoder for every domain. For each domain $D$, we compute latent activation frequency and activation magnitude:
+\begin{align}
+p_k(D) &= \mathbb{E}_{x\sim D,\,t}\left[\mathbf{1}[z_{t,k}(x)>\tau]\right],\\
+\mu_k(D) &= \mathbb{E}_{x\sim D,\,t}\left[z_{t,k}(x)\right],
+\end{align}
+where $t$ indexes tokens and $\tau$ is the active-latent threshold. We then score each latent by the difference between a source domain and a shifted domain:
+\begin{equation}
+s_k(D_i;D_0)=
+\alpha |p_k(D_i)-p_k(D_0)|
+ +(1-\alpha)|\mu_k(D_i)-\mu_k(D_0)|.
+\end{equation}
+Latents with low scores across all domains are treated as domain-invariant; latents with high scores for a specific shift are treated as shift-sensitive. For image-level analysis, token activations are pooled by mean activation, maximum activation, or frequency of active patches.
+
+\subsection{Stage 3: Latent Intervention and Adaptation}
+
+Given a set of shift-sensitive latents $\mathcal{S}$, we test whether they are merely diagnostic or causally useful for adaptation. The simplest intervention modifies the sparse vector before decoding:
+\begin{equation}
+z'_k =
+\begin{cases}
+\gamma_k z_k & k\in \mathcal{S},\\
+z_k & \text{otherwise},
+\end{cases}
+\end{equation}
+where $\gamma_k$ can suppress or amplify a latent. The modified representation $\hat{h}'=G_\psi(z')$ is then injected at the corresponding layer or used to define a feature-consistency target. A second implementation path follows the repository's adaptor code: near-identity adaptor modules are inserted into the last ResNet or ViT blocks, and are trained with clean and perturbed classification losses plus feature or KL consistency. The SAE latent score can select which perturbation-sensitive features to preserve or attenuate.
+
+\subsection{Evaluation}
+
+We evaluate behavioral, representational, and sparse-latent metrics. Behavioral metrics include accuracy, relative accuracy, accuracy drop against clean data, and intervention gain. Representational metrics include Jensen-Shannon divergence between clean and shifted logits and CKA between clean and shifted representations. SAE metrics include validation normalized MSE, cosine reconstruction, mean active latent count, activation frequency, and domain-sensitive score. The expected experimental table will compare: clean baseline, input-perturbation feature reliance, SAE latent profiling without intervention, SAE latent reweighting, and adaptor-based intervention.
+
+\section{Expected Results and Discussion Themes}
+
+We expect SAE latent profiles to reveal domain differences that are hidden by coarse perturbation labels. For example, ImageNet-R is a style/rendition shift, but its effect may not be reducible to texture alone; a subset of latents may respond to edge abstraction, local part layout, or semantic rendering style. A successful profile would show that some latents remain stable across ImageNet and ImageNet-R, while others change frequency or magnitude consistently under specific perturbations.
+
+We also expect the intervention results to be selective rather than uniformly positive. Suppressing a shift-sensitive latent may help when that latent tracks a harmful shortcut, but hurt when it tracks a useful domain-specific cue. Therefore, the main contribution is not simply an accuracy gain; it is a method for connecting domain performance changes to sparse, inspectable internal features. Planned extensions will compare Vanilla L1 SAE with JumpReLU and Top-K SAEs, focusing on the trade-off between reconstruction fidelity, sparsity, interpretability, and adaptation performance.
+
+\bibliography{references}
+\bibliographystyle{aaai2027}
+\end{document}
