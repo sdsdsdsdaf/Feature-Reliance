@@ -47,7 +47,7 @@
 ### Introduction
 - Paragraph 1: 실제 배포 환경에서는 test stream의 domain이 시간에 따라 바뀌며, 하나의 모델을 계속 업데이트하면 catastrophic drift나 unstable adaptation이 발생할 수 있다.
 - Paragraph 2: ReservoirTTA는 여러 reservoir specialist를 유지하고 style vector로 sample을 routing해 안정성을 높이는 baseline이다.
-- Paragraph 3: 그러나 style vector는 외부적/저차원 style descriptor에 가까워, 모델이 실제로 의존하는 내부 feature 변화와 완전히 일치하지 않을 수 있다.
+- Paragraph 3: 그러나 style vector는 외부적/저차원 style descriptor에 가까워, 내부 feature 변화와 완전히 일치하지 않을 수 있으며 해석이 불가능하다.
 - Paragraph 4: SAE latent vector는 pretrained vision model의 internal representation을 sparse하고 비교 가능한 pattern으로 변환하므로 routing signal로 적합하다.
 - Paragraph 5: 본 논문은 ReservoirTTA의 StyleVec를 SAE latent로 대체하고, latent similarity 기반 routing 및 specialist adaptation을 제안한다.
 - Paragraph 6: 기여 요약. single SAE 기반 domain tendency descriptor, SAE latent routing, ReservoirTTA baseline과 직접 비교 가능한 TTA protocol, 효율성/해석성 trade-off 분석.
