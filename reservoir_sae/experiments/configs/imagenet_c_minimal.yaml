@@ -1,0 +1,47 @@
+seed: 0
+device: cuda
+output_dir: outputs/reservoir_sae/minimal
+
+dataset:
+  imagenet_name: ILSVRC/imagenet-1k
+  imagenet_split: validation
+  imagenet_c_name: niuniandaji/mini-imagenet-c
+  imagenet_c_config: null
+  imagenet_c_split: test
+  cache_dir: data/hf_cache
+  corruptions:
+    - gaussian_noise
+    - motion_blur
+    - contrast
+    - jpeg_compression
+  severities:
+    - 5
+  max_samples: 1024
+
+model:
+  name: resnet50
+  pretrained: true
+  image_size: 224
+
+reservoir:
+  max_models: 8
+  threshold_quantile: 0.95
+  source_batches_for_threshold: 16
+  prototype_momentum: 0.2
+
+tta:
+  enabled: true
+  lr: 0.00025
+  steps: 1
+  update_bn_only: true
+
+routing:
+  mode: stylevec
+  style_idx:
+    - 2
+    - 5
+    - 7
+  style_format: LOGVAR
+  sae_checkpoint: null
+  sae_pooling: mean
+  sae_active_threshold: 0.0

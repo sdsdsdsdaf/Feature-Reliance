@@ -7,6 +7,8 @@ outputs/*
 .agents/*
 data
 .vscode
+third_party
+third_party/*
 
 # 2. MetaData 폴더는 제외 (살림)
 !Cache/MetaData/
