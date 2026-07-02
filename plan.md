@@ -81,7 +81,14 @@ baseline descriptor: ReservoirTTA VGG StyleVec
 
 첫 구현은 Track A로 시작한다. 즉, ReservoirTTA와 마찬가지로 routing extractor는 VGG-19를 쓰되, StyleVec을 VGG feature SAE latent로 대체한다. 이 단계에서 reservoir 코드, compact ImageNet-C loader, routing log, metric 저장이 모두 작동하는지 확인한다.
 
-그 다음 Track B를 추가한다. ResNet-50 ImageNet-C classifier와 같은 ResNet-50 내부 feature에서 SAE를 학습하고, VGG StyleVec baseline 대비 classifier-aligned SAE routing을 main novelty experiment로 둔다. 현재 프로젝트의 ViT SAE는 pipeline smoke test에는 쓸 수 있지만, ImageNet-C/ReservoirTTA의 공정 비교 결과로는 별도 표시한다.
+그 다음 Track B를 추가한다. 우선 이미 SAE를 학습해 온 ViT-B/16 block-token latent를 routing descriptor로 사용한다. 이때 비교는 두 축으로 분리한다.
+
+```text
+Track B1: ViT-SAE routing, classifier는 기존 ReservoirTTA 설정(예: ResNet-50)
+Track B2: classifier-aligned ViT-SAE routing, classifier도 ViT-B/16이고 routing hook도 동일한 ViT-B/16 instance
+```
+
+B1은 "SAE latent descriptor 자체가 routing signal로 유효한가"를 본다. B2는 사용자가 요구한 main novelty 비교로, classifier/adaptation model과 SAE routing extractor가 같은 ViT-B/16이므로 model-internal feature reliance routing 주장에 직접 대응한다. VGG-SAE는 controlled comparison으로 남기되, 최종 표에는 VGG StyleVec, VGG-SAE, ViT-SAE, classifier-aligned ViT-SAE를 분리해 보고한다.
 
 ## Directory Plan
 

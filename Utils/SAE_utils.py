@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import sys
 import time
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
@@ -18,6 +19,12 @@ from tqdm.auto import tqdm
 
 from Model.SAE import VanillaL1SAE
 from Utils.early_stopping import EarlyStopper, unwrap_compiled_model
+
+TQDM_KW = {
+    "file": sys.stdout,
+    "disable": not sys.stdout.isatty(),
+    "dynamic_ncols": True,
+}
 
 
 class TransformDataset(Dataset):
@@ -114,7 +121,7 @@ def compute_mean_bias(tokens):
 def compute_geometric_median(tokens, max_iter=100, tol=1e-5, eps=1e-8):
     tokens = tokens.float()
     y = tokens.mean(dim=0)
-    for _ in tqdm(range(int(max_iter)), desc="geometric median"):
+    for _ in tqdm(range(int(max_iter)), desc="geometric median", **TQDM_KW):
         distances = torch.norm(tokens - y, dim=1).clamp_min(eps)
         weights = 1.0 / distances
         y_next = (tokens * weights[:, None]).sum(dim=0) / weights.sum()
@@ -124,7 +131,7 @@ def compute_geometric_median(tokens, max_iter=100, tol=1e-5, eps=1e-8):
     return y
 
 
-def select_block_tokens(block_output, token_scope="patch"):
+def select_block_tokens(block_output, token_scope="patch", cpu=False):
     if isinstance(block_output, (tuple, list)):
         block_output = block_output[0]
     if block_output.ndim != 3:
@@ -138,7 +145,8 @@ def select_block_tokens(block_output, token_scope="patch"):
         tokens = block_output
     else:
         raise ValueError("token_scope must be one of: 'cls', 'patch', 'all', 'clspatch'.")
-    return tokens.reshape(-1, tokens.shape[-1]).detach().float().cpu()
+    tokens = tokens.reshape(-1, tokens.shape[-1]).detach().float()
+    return tokens.cpu() if cpu else tokens
 
 
 def normalize_tokens(tokens, stats):
@@ -172,11 +180,11 @@ def collect_tokens_with_hook(
     total = 0
 
     def hook(_module, _inputs, output):
-        captured["tokens"] = select_block_tokens(output, token_scope=token_scope)
+        captured["tokens"] = select_block_tokens(output, token_scope=token_scope, cpu=True)
 
     handle = model.blocks[target_block].register_forward_hook(hook)
     try:
-        for images, labels in tqdm(loader, desc="collecting ViT block tokens"):
+        for images, labels in tqdm(loader, desc="collecting ViT block tokens", **TQDM_KW):
             captured.clear()
             _ = model(images.to(device))
             tokens = captured["tokens"]
@@ -215,7 +223,7 @@ def iter_token_batches_with_hook(model, loader, max_tokens, target_block, token_
     emitted = 0
 
     def hook(_module, _inputs, output):
-        captured["tokens"] = select_block_tokens(output, token_scope=token_scope)
+        captured["tokens"] = select_block_tokens(output, token_scope=token_scope, cpu=True)
 
     handle = model.blocks[target_block].register_forward_hook(hook)
     try:
@@ -245,6 +253,7 @@ def fit_token_normalizer_streaming(model, loader, max_tokens, target_block, toke
     for tokens in tqdm(
         iter_token_batches_with_hook(model, loader, max_tokens, target_block, token_scope, device),
         desc="fitting SAE token normalizer",
+        **TQDM_KW,
     ):
         tokens = tokens.float()
         if token_sum is None:
@@ -276,6 +285,7 @@ def compute_b_dec_init_streaming(model, loader, token_stats, max_tokens, target_
         for tokens in tqdm(
             iter_token_batches_with_hook(model, loader, max_tokens, target_block, token_scope, device),
             desc="streaming b_dec mean",
+            **TQDM_KW,
         ):
             tokens = normalize_tokens_inplace(tokens.float(), token_stats)
             token_sum += tokens.double().sum(dim=0)
@@ -288,7 +298,11 @@ def compute_b_dec_init_streaming(model, loader, token_stats, max_tokens, target_
         raise ValueError(f"Unknown dec_bias_mode: {sae_config.dec_bias_mode}")
 
     y = torch.zeros(dim, dtype=torch.float32)
-    for _ in tqdm(range(int(sae_config.bias_init_geom_max_iter)), desc="streaming b_dec geometric median"):
+    for _ in tqdm(
+        range(int(sae_config.bias_init_geom_max_iter)),
+        desc="streaming b_dec geometric median",
+        **TQDM_KW,
+    ):
         numerator = torch.zeros(dim, dtype=torch.float64)
         denominator = torch.zeros((), dtype=torch.float64)
         for tokens in iter_token_batches_with_hook(model, loader, max_tokens, target_block, token_scope, device):
@@ -502,7 +516,12 @@ def train_sae_streaming(
         train_rows = 0
         carry = None
 
-        with tqdm(total=expected_steps, desc=f"SAE epoch {epoch}/{config.optim_config.epochs}", leave=False) as pbar:
+        with tqdm(
+            total=expected_steps,
+            desc=f"SAE epoch {epoch}/{config.optim_config.epochs}",
+            leave=False,
+            **TQDM_KW,
+        ) as pbar:
             for token_batch in iter_token_batches_with_hook(
                 model,
                 loader,
@@ -637,7 +656,12 @@ def train_sae_cached(
         train_loss_sum = train_mse_sum = train_l1_sum = 0.0
         train_rows = 0
 
-        for (xb_cpu,) in tqdm(token_loader, desc=f"SAE cached epoch {epoch}/{config.optim_config.epochs}", leave=False):
+        for (xb_cpu,) in tqdm(
+            token_loader,
+            desc=f"SAE cached epoch {epoch}/{config.optim_config.epochs}",
+            leave=False,
+            **TQDM_KW,
+        ):
             xb = xb_cpu.to(device, non_blocking=True).float()
             loss, recon_loss, l1_loss, x_hat, z = _run_sae_step(
                 sae, optimizer, xb, scaler, config.sae, config.optim_config, device
@@ -727,7 +751,7 @@ def _build_epoch_row(sae, val_tokens, hidden_dim, epoch, train_loss_sum, train_m
 def evaluate_sae_tokens(sae, tokens_norm, batch_size, threshold, device):
     sae.eval().to(device)
     total_sse = total_cosine = total_l0 = total_rows = total_elements = 0.0
-    for start in tqdm(range(0, tokens_norm.shape[0], batch_size), leave=False, desc="Eval"):
+    for start in tqdm(range(0, tokens_norm.shape[0], batch_size), leave=False, desc="Eval", **TQDM_KW):
         xb = tokens_norm[start : start + batch_size].float().to(device, non_blocking=True)
         x_hat, z = sae(xb)
         total_sse += float((xb - x_hat).square().sum().item())
@@ -755,7 +779,12 @@ def latent_frequency(sae, tokens_norm, batch_size, threshold, device):
     hidden_dim = base_sae.hidden_dim
     counts = torch.zeros(hidden_dim)
     total = 0
-    for start in tqdm(range(0, tokens_norm.shape[0], batch_size), leave=False, desc="latent frequency"):
+    for start in tqdm(
+        range(0, tokens_norm.shape[0], batch_size),
+        leave=False,
+        desc="latent frequency",
+        **TQDM_KW,
+    ):
         xb = tokens_norm[start : start + batch_size].float().to(device)
         z = base_sae.encode(xb).detach().cpu()
         counts += (z > threshold).float().sum(dim=0)

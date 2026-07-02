@@ -81,6 +81,7 @@ class VGGSAEDescriptor(nn.Module):
         pooled_features = [self._pool_feature_map(self.features[idx]) for idx in self.style_idx]
         feature = torch.cat(pooled_features, dim=1)
         normalized = (feature - self.feature_mean.to(feature.device)) / self.feature_std.to(feature.device)
+        self.sae.to(device=normalized.device, dtype=normalized.dtype)
         z = self.sae.encode(normalized)
         if self.pooling == "frequency":
             descriptor = (z > self.active_threshold).float()
@@ -99,4 +100,3 @@ class VGGSAEDescriptor(nn.Module):
             self.features[idx] = output.detach()
 
         return hook
-

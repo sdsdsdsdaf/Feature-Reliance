@@ -2,10 +2,13 @@ import copy
 import csv
 from datetime import timedelta
 import itertools
+import os
 import traceback
 from pathlib import Path
 
 import time
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+import matplotlib.pyplot as plt
 import torch
 import timm
 from timm.data import create_transform, resolve_model_data_config
@@ -13,7 +16,14 @@ from torch.utils.data import DataLoader
 from torchvision.datasets import Imagenette
 
 from Utils.Config import SAEExperimentConfig
-from Utils.SAE_plot_utils import save_trial_plots
+from Utils.early_stopping import unwrap_compiled_model
+from Utils.SAE_plot_utils import (
+    _plot_overlay,
+    collect_patch_latents_for_batch,
+    model_tensor_to_image,
+    save_plot,
+    save_trial_plots,
+)
 from Utils.SAE_utils import (
     TransformDataset,
     collect_tokens_with_hook,
@@ -93,6 +103,19 @@ GRID_SPACE = {
     "sae.dec_bias_mode": B_DEC_INIT_GRID,
     "sae.active_threshold": [0.1, 0.2],
 }
+
+# Latent masking / feature-alignment validation
+RUN_LATENT_MASKING_ALIGNMENT = True
+LATENT_MASK_NUM_LATENTS = 16
+LATENT_MASK_NUM_TOKENS = 512
+LATENT_MASK_TOP_FEATURES = 12
+LATENT_MASK_SEED = 0
+LATENT_MASK_ACTIVE_ONLY = True
+LATENT_MASK_SAVE_TENSORS = False
+RUN_LATENT_OVERLAY_VISUALIZATION = True
+LATENT_OVERLAY_NUM_IMAGES = 4
+LATENT_OVERLAY_LATENTS_PER_IMAGE = 4
+LATENT_OVERLAY_SEED = 0
 
 
 def build_default_config():
@@ -304,6 +327,25 @@ def run_sae_trial(config, trial_dir, trial_id=None):
         device=config.extraction_config.device,
     )
 
+    latent_masking_alignment = run_latent_masking_alignment_validation(
+        trained_sae,
+        val_tokens,
+        val_labels,
+        trial_dir,
+        config,
+    )
+    latent_overlay_visualizations = run_latent_overlay_visualizations(
+        model,
+        val_dataset,
+        trained_sae,
+        token_stats,
+        trial_dir,
+        config,
+        mean,
+        std,
+        latent_ids=latent_masking_alignment.get("selected_latents", []),
+    )
+
     diagnostics = save_trial_plots(
         trial_dir=trial_dir,
         model=model,
@@ -333,6 +375,8 @@ def run_sae_trial(config, trial_dir, trial_id=None):
         "best_val_nmse": best_row.get("normalized_mse"),
         "best_active_mean_count": best_row.get("active_mean_count"),
         "final_validation_metrics": validation_metrics,
+        "latent_masking_alignment": latent_masking_alignment,
+        "latent_overlay_visualizations": latent_overlay_visualizations,
         "checkpoint_path": str(checkpoint_path),
         "diagnostics": diagnostics,
     }
@@ -398,6 +442,344 @@ def write_grid_summary_csv(path, rows):
         writer.writeheader()
         for row in flat_rows:
             writer.writerow(row)
+
+
+def _mse_mean(x):
+    return float(torch.mean(x.float().pow(2)).item())
+
+
+def _top_label_counts(labels, mask, k=5):
+    if labels is None or labels.numel() == 0 or not bool(mask.any()):
+        return []
+    active_labels = labels[mask.detach().cpu()]
+    if active_labels.numel() == 0:
+        return []
+    unique, counts = torch.unique(active_labels, return_counts=True)
+    order = torch.argsort(counts, descending=True)[: int(k)]
+    return [
+        {"label": int(unique[idx].item()), "count": int(counts[idx].item())}
+        for idx in order
+    ]
+
+
+def _write_latent_alignment_csv(path, rows):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "latent_id",
+        "mean_activation",
+        "activation_frequency",
+        "active_mean_activation",
+        "delta_nmse",
+        "masked_nmse",
+        "recon_shift_mse",
+        "decoder_norm",
+        "encoder_norm",
+        "encoder_decoder_cosine",
+        "top_feature_indices",
+        "top_feature_weights",
+        "top_feature_activation_corrs",
+        "top_active_labels",
+    ]
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            out = {}
+            for key in fieldnames:
+                value = row.get(key)
+                if isinstance(value, (list, tuple, dict)):
+                    out[key] = jsonable(value)
+                else:
+                    out[key] = value
+            writer.writerow(out)
+
+
+@torch.no_grad()
+def run_latent_masking_alignment_validation(sae, val_tokens, val_labels, trial_dir, config):
+    """Mask random SAE latents and align their reconstruction effect to input features.
+
+    The validation tokens are normalized ViT block features. Each latent is
+    aligned to the input feature dimensions where its decoder vector has the
+    largest absolute weights. Masking uses the linear decoder identity:
+    x_hat_without_j = x_hat - z_j * W_dec[j].
+    """
+
+    if not RUN_LATENT_MASKING_ALIGNMENT:
+        return {"enabled": False}
+    if val_tokens is None or int(val_tokens.shape[0]) == 0:
+        return {"enabled": True, "status": "skipped", "reason": "empty val_tokens"}
+
+    start_time = time.perf_counter()
+    trial_dir = Path(trial_dir)
+    out_dir = trial_dir / "latent_masking_alignment"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    base_sae = unwrap_compiled_model(sae).eval().to(config.extraction_config.device)
+    num_tokens = min(int(LATENT_MASK_NUM_TOKENS), int(val_tokens.shape[0]))
+    generator = torch.Generator(device="cpu").manual_seed(int(LATENT_MASK_SEED))
+    sample_idx = torch.randperm(int(val_tokens.shape[0]), generator=generator)[:num_tokens]
+    sample_tokens_cpu = val_tokens[sample_idx].float().cpu()
+    sample_labels = val_labels[sample_idx].detach().cpu() if val_labels is not None else None
+    sample_tokens = sample_tokens_cpu.to(config.extraction_config.device)
+
+    x_hat, z = base_sae(sample_tokens)
+    z = z.float()
+    x_hat = x_hat.float()
+    hidden_dim = int(z.shape[1])
+    threshold = float(config.sae.active_threshold)
+    active_freq = (z > threshold).float().mean(dim=0).cpu()
+    mean_activation = z.mean(dim=0).cpu()
+
+    if LATENT_MASK_ACTIVE_ONLY:
+        candidates = torch.nonzero(active_freq > 0, as_tuple=False).flatten()
+        if candidates.numel() == 0:
+            candidates = torch.arange(hidden_dim)
+    else:
+        candidates = torch.arange(hidden_dim)
+    shuffled = candidates[torch.randperm(candidates.numel(), generator=generator)]
+    selected = shuffled[: min(int(LATENT_MASK_NUM_LATENTS), int(shuffled.numel()))].tolist()
+
+    centered = sample_tokens.float()
+    token_var = torch.mean((centered - centered.mean(dim=0, keepdim=True)).pow(2)).clamp_min(1e-12)
+    full_mse = torch.mean((x_hat - centered).pow(2))
+    full_nmse = float((full_mse / token_var).item())
+
+    w_dec = base_sae.W_dec.detach().float()
+    w_enc = base_sae.W_enc.detach().float()
+    rows = []
+    details = []
+    top_k = min(int(LATENT_MASK_TOP_FEATURES), int(w_dec.shape[1]))
+
+    for latent_id in selected:
+        latent_id = int(latent_id)
+        activation = z[:, latent_id].detach()
+        decoder_vec = w_dec[latent_id].to(x_hat.device)
+        contribution = activation[:, None] * decoder_vec[None, :]
+        masked_recon = x_hat - contribution
+        masked_mse = torch.mean((masked_recon - centered).pow(2))
+        masked_nmse = float((masked_mse / token_var).item())
+        recon_shift_mse = _mse_mean(contribution)
+        active_mask = (activation > threshold).detach().cpu()
+        active_values = activation.detach().cpu()[active_mask]
+
+        top_abs, top_idx = torch.topk(w_dec[latent_id].abs().cpu(), k=top_k)
+        top_idx = top_idx.tolist()
+        top_weights = [float(w_dec[latent_id, idx].item()) for idx in top_idx]
+        feature_corrs = []
+        activation_cpu = activation.detach().cpu()
+        activation_std = activation_cpu.std().clamp_min(1e-8)
+        for feature_idx in top_idx:
+            feature_values = sample_tokens_cpu[:, feature_idx]
+            feature_std = feature_values.std().clamp_min(1e-8)
+            corr = torch.mean(
+                ((activation_cpu - activation_cpu.mean()) / activation_std)
+                * ((feature_values - feature_values.mean()) / feature_std)
+            )
+            feature_corrs.append(float(corr.item()))
+
+        enc_vec = w_enc[:, latent_id].detach().cpu()
+        dec_vec = w_dec[latent_id].detach().cpu()
+        enc_dec_cos = torch.nn.functional.cosine_similarity(enc_vec, dec_vec, dim=0).item()
+        label_counts = _top_label_counts(sample_labels, active_mask, k=5)
+        row = {
+            "latent_id": latent_id,
+            "mean_activation": float(mean_activation[latent_id].item()),
+            "activation_frequency": float(active_freq[latent_id].item()),
+            "active_mean_activation": float(active_values.mean().item()) if active_values.numel() else 0.0,
+            "delta_nmse": float(masked_nmse - full_nmse),
+            "masked_nmse": masked_nmse,
+            "recon_shift_mse": recon_shift_mse,
+            "decoder_norm": float(dec_vec.norm().item()),
+            "encoder_norm": float(enc_vec.norm().item()),
+            "encoder_decoder_cosine": float(enc_dec_cos),
+            "top_feature_indices": top_idx,
+            "top_feature_weights": top_weights,
+            "top_feature_activation_corrs": feature_corrs,
+            "top_active_labels": label_counts,
+        }
+        rows.append(row)
+        details.append(
+            {
+                **row,
+                "top_feature_abs_weights": [float(v.item()) for v in top_abs],
+            }
+        )
+
+    if selected:
+        selected_contribution = z[:, selected] @ w_dec[selected].to(z.device)
+        all_masked_recon = x_hat - selected_contribution
+        all_masked_nmse = float((torch.mean((all_masked_recon - centered).pow(2)) / token_var).item())
+        all_masked_shift_mse = _mse_mean(selected_contribution)
+    else:
+        all_masked_nmse = full_nmse
+        all_masked_shift_mse = 0.0
+
+    _write_latent_alignment_csv(out_dir / "latent_alignment.csv", rows)
+    save_json(out_dir / "latent_alignment.json", details)
+    summary = {
+        "enabled": True,
+        "status": "completed",
+        "num_sample_tokens": int(num_tokens),
+        "hidden_dim": int(hidden_dim),
+        "candidate_pool_size": int(candidates.numel()),
+        "selected_latents": [int(x) for x in selected],
+        "active_only": bool(LATENT_MASK_ACTIVE_ONLY),
+        "active_threshold": threshold,
+        "full_reconstruction_nmse": full_nmse,
+        "all_selected_masked_nmse": all_masked_nmse,
+        "all_selected_delta_nmse": float(all_masked_nmse - full_nmse),
+        "all_selected_recon_shift_mse": all_masked_shift_mse,
+        "csv": str(out_dir / "latent_alignment.csv"),
+        "json": str(out_dir / "latent_alignment.json"),
+        "elapsed_seconds": float(time.perf_counter() - start_time),
+    }
+    if LATENT_MASK_SAVE_TENSORS:
+        tensor_path = out_dir / "latent_masking_tensors.pt"
+        torch.save(
+            {
+                "sample_indices": sample_idx,
+                "sample_tokens": sample_tokens_cpu,
+                "sample_labels": sample_labels,
+                "selected_latents": torch.tensor(selected, dtype=torch.long),
+                "z_selected": z[:, selected].detach().cpu() if selected else torch.empty(num_tokens, 0),
+                "full_reconstruction": x_hat.detach().cpu(),
+            },
+            tensor_path,
+        )
+        summary["tensors"] = str(tensor_path)
+    save_json(out_dir / "summary.json", summary)
+    print(
+        "latent masking/alignment:",
+        f"sample_tokens={num_tokens}",
+        f"selected_latents={len(selected)}",
+        f"full_nmse={full_nmse:.6f}",
+        f"all_masked_delta_nmse={summary['all_selected_delta_nmse']:.6f}",
+    )
+    return summary
+
+
+@torch.no_grad()
+def run_latent_overlay_visualizations(
+    model,
+    val_dataset,
+    sae,
+    token_stats,
+    trial_dir,
+    config,
+    mean,
+    std,
+    latent_ids=None,
+):
+    """Save image-level SAE latent activation overlays for a few validation images."""
+
+    if not RUN_LATENT_OVERLAY_VISUALIZATION:
+        return {"enabled": False}
+    token_scope = str(config.hook.token_scope).lower()
+    if token_scope == "cls":
+        return {
+            "enabled": True,
+            "status": "skipped",
+            "reason": "CLS-token SAE has no patch grid to overlay on the image.",
+        }
+    if not hasattr(model, "blocks"):
+        return {
+            "enabled": True,
+            "status": "skipped",
+            "reason": "Overlay visualization requires a ViT-style model with .blocks.",
+        }
+
+    start_time = time.perf_counter()
+    trial_dir = Path(trial_dir)
+    out_dir = trial_dir / "latent_masking_alignment" / "overlays"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    generator = torch.Generator(device="cpu").manual_seed(int(LATENT_OVERLAY_SEED))
+    num_images = min(int(LATENT_OVERLAY_NUM_IMAGES), len(val_dataset))
+    image_indices = torch.randperm(len(val_dataset), generator=generator)[:num_images].tolist()
+    candidate_latents = [int(x) for x in latent_ids or []]
+
+    records = []
+    for image_idx in image_indices:
+        image_tensor, label = val_dataset[int(image_idx)]
+        images = image_tensor.unsqueeze(0)
+        z = collect_patch_latents_for_batch(
+            images,
+            model,
+            sae,
+            token_stats,
+            config.hook.target_block,
+            config.hook.token_scope,
+            config.extraction_config.device,
+        )
+        z_image = z[0]
+        if candidate_latents:
+            valid_ids = [latent_id for latent_id in candidate_latents if 0 <= latent_id < z_image.shape[1]]
+            if valid_ids:
+                scores = torch.tensor([float(z_image[:, latent_id].max().item()) for latent_id in valid_ids])
+                order = torch.argsort(scores, descending=True)[: int(LATENT_OVERLAY_LATENTS_PER_IMAGE)]
+                selected = [valid_ids[int(i)] for i in order.tolist()]
+            else:
+                selected = []
+        else:
+            selected = []
+        if not selected:
+            selected = z_image.pow(2).mean(dim=0).topk(min(int(LATENT_OVERLAY_LATENTS_PER_IMAGE), z_image.shape[1])).indices.tolist()
+            selected = [int(x) for x in selected]
+
+        image_np = model_tensor_to_image(image_tensor, mean, std)
+        fig, axes = plt.subplots(1, len(selected) + 1, figsize=(3.2 * (len(selected) + 1), 3.4))
+        if len(selected) == 0:
+            axes = [axes]
+        axes[0].imshow(image_np)
+        axes[0].set_title(f"original\nidx={int(image_idx)}, label={int(label)}", fontsize=9)
+        axes[0].axis("off")
+        latent_records = []
+        for ax, latent_id in zip(axes[1:], selected):
+            patch_map = z_image[:, int(latent_id)]
+            _plot_overlay(ax, image_np, patch_map)
+            active_count = int((patch_map > float(config.sae.active_threshold)).sum().item())
+            peak = float(patch_map.max().item())
+            ax.set_title(f"latent={int(latent_id)}\nactive={active_count}, peak={peak:.2f}", fontsize=9)
+            latent_records.append(
+                {
+                    "latent_id": int(latent_id),
+                    "active_patches": active_count,
+                    "peak_activation": peak,
+                    "mean_activation": float(patch_map.mean().item()),
+                }
+            )
+        fig.suptitle("Random masked SAE latent overlays on original image", fontsize=11)
+        fig.tight_layout()
+        path = save_plot(fig, out_dir, f"latent_overlay_image_{int(image_idx):05d}", dpi=config.output.plot_dpi)
+        records.append(
+            {
+                "image_idx": int(image_idx),
+                "label": int(label),
+                "path": str(path),
+                "latents": latent_records,
+            }
+        )
+
+    summary = {
+        "enabled": True,
+        "status": "completed",
+        "num_images": len(records),
+        "latents_per_image": int(LATENT_OVERLAY_LATENTS_PER_IMAGE),
+        "image_indices": [row["image_idx"] for row in records],
+        "candidate_latents": candidate_latents,
+        "records": records,
+        "output_dir": str(out_dir),
+        "elapsed_seconds": float(time.perf_counter() - start_time),
+    }
+    save_json(out_dir / "summary.json", summary)
+    print(
+        "latent overlay visualization:",
+        f"images={len(records)}",
+        f"latents_per_image={LATENT_OVERLAY_LATENTS_PER_IMAGE}",
+        f"output_dir={out_dir}",
+    )
+    return summary
 
 
 def select_best_trial(summaries, metric, mode):

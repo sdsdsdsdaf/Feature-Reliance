@@ -3,20 +3,20 @@ device: cuda
 output_dir: outputs/reservoir_sae/minimal
 
 dataset:
+  stream_mode: reservoirtta
   imagenet_name: ILSVRC/imagenet-1k
   imagenet_split: validation
-  imagenet_c_name: niuniandaji/mini-imagenet-c
+  imagenet_c_name: ang9867/ImageNet-C
   imagenet_c_config: null
-  imagenet_c_split: test
+  imagenet_c_split: train
+  imagenet_c_root: data/imagenet-c
   cache_dir: data/hf_cache
-  corruptions:
-    - gaussian_noise
-    - motion_blur
-    - contrast
-    - jpeg_compression
-  severities:
-    - 5
-  max_samples: 1024
+  offline: true
+  corruptions: null
+  severities: null
+  num_examples_per_domain: 5000
+  max_samples: null
+  max_domains: null
 
 model:
   name: resnet50
@@ -43,5 +43,12 @@ routing:
     - 7
   style_format: LOGVAR
   sae_checkpoint: null
+  vit_sae_checkpoint: outputs/reservoir_sae/vit_b_sae.pt
+  vit_model_name: vit_base_patch16_224
+  vit_target_block: 10
+  vit_token_scope: patch
+  vit_sae_pooling: frequency
+  vit_sae_active_threshold: 0.2
+  vit_sae_encode_chunk_size: 16384
   sae_pooling: mean
   sae_active_threshold: 0.0
