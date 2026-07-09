@@ -12,7 +12,7 @@ import datasets.config as datasets_config
 from datasets import Dataset, load_dataset
 from PIL import Image
 from timm.data import ImageNetInfo
-from torch.utils.data import DataLoader
+from torch.utils.data import BatchSampler, DataLoader
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -343,6 +343,14 @@ def make_loader(
 
 
 def make_torch_loader(dataset: torch.utils.data.Dataset, batch_size: int, num_workers: int) -> DataLoader:
+    if isinstance(dataset, (ConcatMetaDataset, RecurringMetaDataset)):
+        return DataLoader(
+            dataset,
+            batch_sampler=DomainSequentialBatchSampler(dataset.cumulative_sizes, batch_size),
+            num_workers=num_workers,
+            pin_memory=torch.cuda.is_available(),
+            collate_fn=collate_batch,
+        )
     return DataLoader(
         dataset,
         batch_size=batch_size,
@@ -373,6 +381,63 @@ class ConcatMetaDataset(torch.utils.data.Dataset):
             if idx < cumulative_size:
                 return self.datasets[dataset_idx][idx - previous]
         raise IndexError(idx)
+
+
+class RecurringMetaDataset(torch.utils.data.Dataset):
+    def __init__(self, dataset: torch.utils.data.Dataset, num_recur: int) -> None:
+        self.dataset = dataset
+        self.num_recur = int(num_recur)
+        if self.num_recur <= 0:
+            raise ValueError(f"num_recur must be positive, got {num_recur}")
+        self.base_length = len(dataset)
+
+    def __len__(self) -> int:
+        return self.base_length * self.num_recur
+
+    @property
+    def cumulative_sizes(self) -> list[int]:
+        base_cumulative = getattr(self.dataset, "cumulative_sizes", [self.base_length])
+        out: list[int] = []
+        offset = 0
+        for _ in range(self.num_recur):
+            out.extend(offset + int(size) for size in base_cumulative)
+            offset += self.base_length
+        return out
+
+    def __getitem__(self, idx: int):
+        if idx < 0:
+            idx += len(self)
+        recur_index = int(idx // self.base_length)
+        inner_idx = int(idx % self.base_length)
+        image, label, meta = self.dataset[inner_idx]
+        meta = dict(meta)
+        meta["recur_index"] = recur_index
+        meta["global_index"] = int(idx)
+        return image, label, meta
+
+
+class DomainSequentialBatchSampler(BatchSampler):
+    def __init__(self, cumulative_sizes: list[int], batch_size: int) -> None:
+        self.cumulative_sizes = list(cumulative_sizes)
+        self.batch_size = int(batch_size)
+        if self.batch_size <= 0:
+            raise ValueError(f"batch_size must be positive, got {batch_size}")
+
+    def __iter__(self):
+        start = 0
+        for end in self.cumulative_sizes:
+            for batch_start in range(start, end, self.batch_size):
+                yield list(range(batch_start, min(batch_start + self.batch_size, end)))
+            start = end
+
+    def __len__(self) -> int:
+        total = 0
+        start = 0
+        for end in self.cumulative_sizes:
+            length = end - start
+            total += (length + self.batch_size - 1) // self.batch_size
+            start = end
+        return total
 
 
 class FixedMetaDataset(torch.utils.data.Dataset):
@@ -497,6 +562,7 @@ def build_reservoirtta_imagenet_c_dataset(
     examples_per_domain: int | None = 5000,
     seed: int = 0,
     max_domains: int | None = None,
+    num_recur: int = 1,
 ) -> tuple[torch.utils.data.Dataset, list[dict[str, Any]]]:
     root_path = resolve_imagenet_c_root(root) if root else None
     use_local = root_path is not None and root_path.exists()
@@ -602,7 +668,24 @@ def build_reservoirtta_imagenet_c_dataset(
     if not datasets:
         raise RuntimeError("No ImageNet-C samples were loaded.")
 
-    return ConcatMetaDataset(datasets), segments
+    dataset = ConcatMetaDataset(datasets)
+    num_recur = int(num_recur)
+    if num_recur > 1:
+        dataset = RecurringMetaDataset(dataset, num_recur)
+    return dataset, repeat_segments(segments, num_recur)
+
+
+def repeat_segments(segments: list[dict[str, Any]], num_recur: int) -> list[dict[str, Any]]:
+    if num_recur <= 1:
+        return segments
+    repeated: list[dict[str, Any]] = []
+    for recur_index in range(num_recur):
+        for segment in segments:
+            item = dict(segment)
+            item["recur_index"] = recur_index
+            item["sequence_index"] = len(repeated)
+            repeated.append(item)
+    return repeated
 
 
 def resolve_imagenet_c_root(root: str | Path | None) -> Path | None:
@@ -626,10 +709,12 @@ def collate_batch(batch):
     labels = torch.tensor([item[1] for item in batch], dtype=torch.long)
     meta = {
         "index": [item[2]["index"] for item in batch],
+        "global_index": [item[2].get("global_index", item[2]["index"]) for item in batch],
         "label": [item[2]["label"] for item in batch],
         "raw_label": [item[2]["raw_label"] for item in batch],
         "corruption": [item[2]["corruption"] for item in batch],
         "severity": [item[2]["severity"] for item in batch],
+        "recur_index": [item[2].get("recur_index", 0) for item in batch],
         "domain_index": [item[2].get("domain_index", -1) for item in batch],
         "domain_sample_index": [item[2].get("domain_sample_index", -1) for item in batch],
     }

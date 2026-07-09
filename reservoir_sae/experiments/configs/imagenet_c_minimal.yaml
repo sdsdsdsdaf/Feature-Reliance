@@ -15,6 +15,7 @@ dataset:
   corruptions: null
   severities: null
   num_examples_per_domain: 5000
+  num_recur: 1
   max_samples: null
   max_domains: null
 
@@ -24,10 +25,13 @@ model:
   image_size: 224
 
 reservoir:
-  max_models: 8
-  threshold_quantile: 0.95
+  max_models: 16
+  distance_metric: l2
+  threshold_quantile: 0.999
   source_batches_for_threshold: 16
   prototype_momentum: 0.2
+  ensembling: true
+  init_method: mi
 
 tta:
   enabled: true

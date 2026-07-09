@@ -12,6 +12,14 @@ def softmax_entropy(logits: torch.Tensor) -> torch.Tensor:
     return -(probs * logits.log_softmax(dim=1)).sum(dim=1)
 
 
+def entropy_plus_class_marginal(logits: torch.Tensor) -> torch.Tensor:
+    ent = softmax_entropy(logits).mean()
+    probs = logits.softmax(dim=1)
+    avg_probs = probs.mean(dim=0)
+    class_marginal = torch.sum(avg_probs * torch.log(avg_probs + 1e-8))
+    return ent + class_marginal
+
+
 def configure_bn_only_tent(model: nn.Module) -> list[nn.Parameter]:
     """Freeze model except normalization affine parameters."""
 
@@ -42,11 +50,15 @@ class SpecialistBank:
         self.param_states = [self._clone_params()]
         self.optimizer_states = [deepcopy(optimizer.state_dict())]
 
-    def ensure(self, idx: int, init_from: int = 0) -> None:
+    def ensure(self, idx: int, init_from: int | None = 0) -> None:
         while len(self.param_states) <= idx:
-            init_idx = min(init_from, len(self.param_states) - 1)
-            self.param_states.append([param.clone() for param in self.param_states[init_idx]])
-            self.optimizer_states.append(deepcopy(self.optimizer_states[init_idx]))
+            if init_from is None:
+                self.param_states.append([param.clone() for param in self.source_params])
+                self.optimizer_states.append(deepcopy(self.source_optimizer))
+            else:
+                init_idx = min(int(init_from), len(self.param_states) - 1)
+                self.param_states.append([param.clone() for param in self.param_states[init_idx]])
+                self.optimizer_states.append(deepcopy(self.optimizer_states[init_idx]))
 
     def load(self, idx: int) -> None:
         self.ensure(idx)
@@ -54,6 +66,23 @@ class SpecialistBank:
             for param, saved in zip(self.params, self.param_states[idx]):
                 param.copy_(saved)
         self.optimizer.load_state_dict(self.optimizer_states[idx])
+
+    def load_ensemble(self, weights: list[float] | torch.Tensor) -> None:
+        weights_tensor = torch.as_tensor(weights, dtype=self.params[0].dtype, device=self.params[0].device)
+        if weights_tensor.numel() > len(self.param_states):
+            raise ValueError(f"Got {weights_tensor.numel()} ensemble weights for {len(self.param_states)} specialists.")
+        weights_tensor = weights_tensor / weights_tensor.sum().clamp_min(1e-12)
+        with torch.no_grad():
+            for param_idx, param in enumerate(self.params):
+                stacked = torch.stack(
+                    [
+                        state[param_idx].to(device=param.device, dtype=param.dtype)
+                        for state in self.param_states[: weights_tensor.numel()]
+                    ],
+                    dim=0,
+                )
+                view_shape = (weights_tensor.numel(),) + (1,) * param.ndim
+                param.copy_((stacked * weights_tensor.view(view_shape)).sum(dim=0))
 
     def save(self, idx: int) -> None:
         self.ensure(idx)
@@ -91,4 +120,3 @@ def accuracy(logits: torch.Tensor, labels: torch.Tensor) -> tuple[int, int]:
     correct = int((preds[valid] == labels[valid]).sum().item())
     total = int(valid.sum().item())
     return correct, total
-

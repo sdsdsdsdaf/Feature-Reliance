@@ -17,6 +17,7 @@ import torch.nn.functional as F
 import yaml
 from timm.data import create_transform, resolve_model_data_config
 import timm
+from tqdm.auto import tqdm
 print(f"[done] import torch/yaml/timm ({time.perf_counter() - _import_start:.1f}s)", flush=True)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -28,8 +29,8 @@ print("[start] import reservoir_sae modules", flush=True)
 from reservoir_sae.descriptors.sae_adapter import VGGSAEDescriptor
 from reservoir_sae.descriptors.stylevec_adapter import VGGStyleVecDescriptor
 from reservoir_sae.descriptors.vit_sae_adapter import ViTSAEDescriptor
-from reservoir_sae.simple_reservoir import CosinePrototypeReservoir
-from reservoir_sae.tta import SpecialistBank, accuracy, configure_bn_only_tent, tent_step
+from reservoir_sae.simple_reservoir import PrototypeReservoir
+from reservoir_sae.tta import SpecialistBank, accuracy, configure_bn_only_tent, entropy_plus_class_marginal, tent_step
 from reservoir_sae.utils.progress import progress, stage
 from reservoir_sae.utils.hf_data import (
     build_timm_label_mapping,
@@ -96,6 +97,24 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="Limit ReservoirTTA-style ImageNet-C domains for smoke tests.",
+    )
+    parser.add_argument(
+        "--num-recur",
+        type=int,
+        default=None,
+        help="Repeat the discovered ImageNet-C domain sequence this many times.",
+    )
+    parser.add_argument(
+        "--max-models",
+        type=int,
+        default=None,
+        help="Maximum number of TTA specialists in the reservoir.",
+    )
+    parser.add_argument(
+        "--distance-metric",
+        choices=["l2", "cosine"],
+        default=None,
+        help="Reservoir prototype distance. Default config uses ReservoirTTA-style l2.",
     )
     parser.add_argument(
         "--skip-source-calibration",
@@ -171,18 +190,22 @@ def main() -> None:
         with stage("calibrate reservoir threshold (load clean ImageNet + extract source descriptors)"):
             source_descriptors = collect_source_descriptors(cfg, transform, descriptor, device, batch_size, args)
             if source_descriptors.shape[0] >= 2:
-                dists = 1.0 - source_descriptors @ source_descriptors.T
+                dists = pairwise_descriptor_distances(
+                    source_descriptors,
+                    distance_metric=str(cfg["reservoir"].get("distance_metric", "l2")),
+                )
                 upper = torch.triu(dists, diagonal=1)
                 valid = upper[upper > 0]
                 if valid.numel() > 0:
                     threshold = float(torch.quantile(valid, float(cfg["reservoir"]["threshold_quantile"])).item())
     print(f"Reservoir novelty threshold: {threshold:.4f}")
 
-    reservoir = CosinePrototypeReservoir(
+    reservoir = PrototypeReservoir(
         descriptor_dim=descriptor_dim,
         max_models=int(cfg["reservoir"]["max_models"]),
         threshold=threshold,
         prototype_momentum=float(cfg["reservoir"]["prototype_momentum"]),
+        distance_metric=str(cfg["reservoir"].get("distance_metric", "l2")),
         device=device,
     )
     reservoir.initialize(first_descriptor)
@@ -209,64 +232,104 @@ def main() -> None:
     seen_total = 0
 
     with stage("run online ImageNet-C stream"):
-        for step, (images, labels, meta) in enumerate(
-            progress(test_loader, desc="online ImageNet-C stream", total=len(test_loader), log_every=10)
-        ):
-            images = images.to(device, non_blocking=True)
-            labels = labels.to(device, non_blocking=True)
-            with torch.no_grad():
-                route_descriptor = descriptor(images)
-            route = reservoir.route(route_descriptor)
-
-            if specialists is not None and optimizer is not None:
-                specialists.ensure(route.model_idx)
-                specialists.load(route.model_idx)
-                logits = tent_step(model, images, optimizer, steps=int(cfg["tta"]["steps"]))
-                specialists.save(route.model_idx)
-            else:
+        online_log_path = output_dir / "online_step_log.csv"
+        online_log_fields = [
+            "step",
+            "domain_index",
+            "corruption",
+            "severity",
+            "recur_index",
+            "batch_size",
+            "correct",
+            "total",
+            "batch_accuracy",
+            "online_accuracy",
+            "model_idx",
+            "model_prob",
+            "new_cluster",
+            "parent_model_idx",
+            "num_model_probs",
+            "min_distance",
+            "num_models",
+        ]
+        with online_log_path.open("w", newline="", encoding="utf-8") as online_handle:
+            online_writer = csv.DictWriter(online_handle, fieldnames=online_log_fields)
+            online_writer.writeheader()
+            pbar = tqdm(
+                test_loader,
+                desc="acc=nan online=nan",
+                total=len(test_loader),
+                dynamic_ncols=True,
+                leave=True,
+            )
+            for step, (images, labels, meta) in enumerate(pbar):
+                images = images.to(device, non_blocking=True)
+                labels = labels.to(device, non_blocking=True)
                 with torch.no_grad():
-                    logits = model(images)
+                    route_descriptor = descriptor(images)
+                route = reservoir.route(route_descriptor)
 
-            correct, total = accuracy(logits, labels)
-            correct_total += correct
-            seen_total += total
+                if specialists is not None and optimizer is not None:
+                    if route.new_cluster and str(cfg["reservoir"].get("init_method", "mi")).lower() == "mi":
+                        route.parent_model_idx = select_mi_init_model(model, specialists, images)
+                    specialists.ensure(route.model_idx, init_from=route.parent_model_idx)
+                    if bool(cfg["reservoir"].get("ensembling", True)) and route.model_probs is not None:
+                        specialists.load_ensemble(route.model_probs)
+                        with torch.no_grad():
+                            pred_logits = model(images)
+                    else:
+                        specialists.load(route.model_idx)
+                        with torch.no_grad():
+                            pred_logits = model(images)
+                    specialists.load(route.model_idx)
+                    _adapt_logits = tent_step(model, images, optimizer, steps=int(cfg["tta"]["steps"]))
+                    specialists.save(route.model_idx)
+                else:
+                    with torch.no_grad():
+                        pred_logits = model(images)
 
-            corruption = majority(meta["corruption"])
-            severity = majority(meta["severity"])
-            domain_index = majority(meta["domain_index"])
-            batch_acc = correct / total if total else float("nan")
-            online_acc = correct_total / seen_total if seen_total else float("nan")
-            metrics_rows.append(
-                {
+                correct, total = accuracy(pred_logits, labels)
+                correct_total += correct
+                seen_total += total
+
+                corruption = majority(meta["corruption"])
+                severity = majority(meta["severity"])
+                recur_index = majority(meta["recur_index"])
+                domain_index = majority(meta["domain_index"])
+                batch_acc = correct / total if total else float("nan")
+                online_acc = correct_total / seen_total if seen_total else float("nan")
+                pbar.set_description(f"acc={batch_acc:.3f} online={online_acc:.3f}")
+
+                metrics_row = {
                     "step": step,
                     "domain_index": domain_index,
                     "corruption": corruption,
                     "severity": severity,
+                    "recur_index": recur_index,
                     "batch_size": int(images.shape[0]),
                     "correct": correct,
                     "total": total,
                     "batch_accuracy": batch_acc,
                     "online_accuracy": online_acc,
                 }
-            )
-            routing_rows.append(
-                {
+                routing_row = {
                     "step": step,
                     "domain_index": domain_index,
                     "corruption": corruption,
                     "severity": severity,
+                    "recur_index": recur_index,
                     "model_idx": route.model_idx,
                     "model_prob": route.model_prob,
                     "new_cluster": route.new_cluster,
+                    "parent_model_idx": route.parent_model_idx,
+                    "num_model_probs": len(route.model_probs or []),
                     "min_distance": route.min_distance,
                     "num_models": route.num_models,
                 }
-            )
-            if step % 10 == 0:
-                print(
-                    f"step={step:04d} acc={batch_acc:.3f} online={online_acc:.3f} "
-                    f"model={route.model_idx} K={route.num_models} domain={domain_index} {corruption}/{severity}"
-                )
+                online_writer.writerow({**metrics_row, **routing_row})
+                online_handle.flush()
+                metrics_rows.append(metrics_row)
+                routing_rows.append(routing_row)
 
     domain_rows = summarize_domains(metrics_rows)
     summary = {
@@ -275,9 +338,14 @@ def main() -> None:
         "online_accuracy": correct_total / seen_total if seen_total else None,
         "num_models": reservoir.num_models,
         "threshold": threshold,
+        "distance_metric": cfg["reservoir"].get("distance_metric", "l2"),
+        "ensembling": bool(cfg["reservoir"].get("ensembling", True)),
+        "init_method": cfg["reservoir"].get("init_method", "mi"),
         "stream_mode": stream_info["stream_mode"],
         "dataset": stream_info["dataset"],
         "num_domains": stream_info["num_domains"],
+        "num_domain_segments": stream_info.get("num_domain_segments", stream_info["num_domains"]),
+        "num_recur": stream_info.get("num_recur", 1),
         "corruptions": c_cfg.get("corruptions"),
         "severities": c_cfg.get("severities"),
     }
@@ -375,6 +443,9 @@ def build_imagenet_c_loader(
         if root_path and root_path.exists():
             local_domains = discover_imagenet_c_domains(root_path, corruptions=corruptions, severities=severities)
             print(f"Local ImageNet-C domains available after filters: {len(local_domains)}")
+        base_num_domains = len(local_domains) if root_path and root_path.exists() else 0
+        if max_domains is not None and base_num_domains:
+            base_num_domains = min(base_num_domains, int(max_domains))
         dataset, segments = build_reservoirtta_imagenet_c_dataset(
             transform=transform,
             root=root_path,
@@ -386,13 +457,16 @@ def build_imagenet_c_loader(
             examples_per_domain=examples_per_domain,
             seed=int(cfg.get("seed", 0)),
             max_domains=max_domains,
+            num_recur=int(c_cfg.get("num_recur", 1)),
         )
         loader = make_torch_loader(dataset, batch_size=batch_size, num_workers=args.num_workers)
         info = {
             "stream_mode": "reservoirtta",
             "dataset": str(root_path) if root_path and root_path.exists() else c_cfg.get("imagenet_c_name"),
             "num_samples": len(dataset),
-            "num_domains": len(segments),
+            "num_domains": base_num_domains or len(segments),
+            "num_domain_segments": len(segments),
+            "num_recur": int(c_cfg.get("num_recur", 1)),
         }
         return loader, info, segments
 
@@ -482,8 +556,33 @@ def collect_source_descriptors(
         for images, _labels, _meta in progress(
             loader, desc="source descriptor calibration", total=len(loader), log_every=10
         ):
-            descriptors.append(F.normalize(descriptor(images.to(device)), dim=1).cpu())
+            descriptors.append(descriptor(images.to(device)).float().cpu())
     return torch.cat(descriptors, dim=0)
+
+
+def pairwise_descriptor_distances(descriptors: torch.Tensor, distance_metric: str = "l2") -> torch.Tensor:
+    distance_metric = str(distance_metric).lower()
+    descriptors = descriptors.float()
+    if distance_metric == "cosine":
+        normalized = F.normalize(descriptors, dim=1)
+        return 1.0 - normalized @ normalized.T
+    if distance_metric == "l2":
+        return torch.cdist(descriptors, descriptors, p=2)
+    raise ValueError(f"Unknown distance_metric={distance_metric!r}")
+
+
+@torch.no_grad()
+def select_mi_init_model(model: torch.nn.Module, specialists: SpecialistBank, images: torch.Tensor) -> int:
+    best_idx = 0
+    best_score = None
+    for idx in range(len(specialists.param_states)):
+        specialists.load(idx)
+        logits = model(images)
+        score = entropy_plus_class_marginal(logits)
+        if best_score is None or float(score.item()) < best_score:
+            best_score = float(score.item())
+            best_idx = idx
+    return best_idx
 
 
 def summarize_domains(metrics_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -524,6 +623,12 @@ def apply_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> None:
         cfg["dataset"]["max_samples"] = args.max_samples
     if args.max_domains is not None:
         cfg["dataset"]["max_domains"] = args.max_domains
+    if args.num_recur is not None:
+        cfg["dataset"]["num_recur"] = args.num_recur
+    if args.max_models is not None:
+        cfg["reservoir"]["max_models"] = args.max_models
+    if args.distance_metric is not None:
+        cfg["reservoir"]["distance_metric"] = args.distance_metric
     if args.cache_dir:
         cfg["dataset"]["cache_dir"] = args.cache_dir
     if args.stream_mode:

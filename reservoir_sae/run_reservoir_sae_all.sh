@@ -15,6 +15,9 @@ BATCH_SIZE="64"
 NUM_WORKERS="2"
 MAX_SAMPLES="5000"
 MAX_DOMAINS=""
+NUM_RECUR="1"
+MAX_MODELS="16"
+DISTANCE_METRIC="l2"
 CONDA_ENV=""
 SAE_CHECKPOINT="outputs/reservoir_sae/vgg_sae.pt"
 VIT_SAE_CHECKPOINT="outputs/reservoir_sae/vit_b_sae.pt"
@@ -40,6 +43,9 @@ Options:
   --num-workers N               Default: 2.
   --max-samples N               ReservoirTTA mode: examples per domain. mixed_hf: total examples.
   --max-domains N               Optional smoke-test limit on corruption/severity domains.
+  --num-recur N                 Repeat the ImageNet-C domain sequence N times.
+  --max-models N                Reservoir specialist cap. Default: 16, matching ReservoirTTA.
+  --distance-metric l2|cosine   Reservoir prototype distance. Default: l2.
   --sae-checkpoint PATH         VGG-SAE checkpoint.
   --vit-sae-checkpoint PATH     ViT-SAE checkpoint.
   --routings "a,b,c"            Comma-separated routing list.
@@ -66,6 +72,9 @@ while [[ $# -gt 0 ]]; do
     --num-workers) NUM_WORKERS="$2"; shift 2 ;;
     --max-samples) MAX_SAMPLES="$2"; shift 2 ;;
     --max-domains) MAX_DOMAINS="$2"; shift 2 ;;
+    --num-recur) NUM_RECUR="$2"; shift 2 ;;
+    --max-models) MAX_MODELS="$2"; shift 2 ;;
+    --distance-metric) DISTANCE_METRIC="$2"; shift 2 ;;
     --sae-checkpoint) SAE_CHECKPOINT="$2"; shift 2 ;;
     --vit-sae-checkpoint) VIT_SAE_CHECKPOINT="$2"; shift 2 ;;
     --routings)
@@ -113,6 +122,9 @@ echo "Batch size:   $BATCH_SIZE"
 echo "Workers:      $NUM_WORKERS"
 echo "Max samples:  $MAX_SAMPLES"
 echo "Max domains:  ${MAX_DOMAINS:-all}"
+echo "Num recur:    $NUM_RECUR"
+echo "Max models:   $MAX_MODELS"
+echo "Distance:     $DISTANCE_METRIC"
 echo "Routings:     ${ROUTINGS[*]}"
 echo
 
@@ -132,6 +144,9 @@ for routing in "${ROUTINGS[@]}"; do
     --batch-size "$BATCH_SIZE"
     --num-workers "$NUM_WORKERS"
     --max-samples "$MAX_SAMPLES"
+    --num-recur "$NUM_RECUR"
+    --max-models "$MAX_MODELS"
+    --distance-metric "$DISTANCE_METRIC"
   )
 
   if [[ -n "$MAX_DOMAINS" ]]; then
