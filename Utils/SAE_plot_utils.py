@@ -522,7 +522,7 @@ def apply_image_perturbation(image_tensor, kind, mean, std, image_idx=0, grid=14
 
 
 @torch.no_grad()
-def collect_patch_latents_for_batch(images, model, sae, token_stats, target_block, token_scope, device, encode_chunk_size=PERTURBATION_ENCODE_CHUNK_SIZE):
+def collect_patch_latents_for_batch(images, model, sae, token_stats, target_block, token_scope, device, encode_chunk_size=PERTURBATION_ENCODE_CHUNK_SIZE, latent_ids=None):
     captured = {}
 
     def hook(_module, _inputs, output):
@@ -549,10 +549,17 @@ def collect_patch_latents_for_batch(images, model, sae, token_stats, target_bloc
     z_chunks = []
     base_sae = _base_sae(sae)
     sae.eval().to(device)
+    latent_ids_device = None
+    if latent_ids is not None:
+        latent_ids_device = torch.as_tensor(latent_ids, dtype=torch.long, device=device)
     for start in range(0, flat_tokens.shape[0], encode_chunk_size):
         chunk = flat_tokens[start:start + encode_chunk_size]
         chunk = normalize_tokens_inplace(chunk, {"mean": mean, "std": std}).to(device)
-        z_chunks.append(base_sae.encode(chunk).detach().cpu())
+        encoded = base_sae.encode(chunk)
+        if latent_ids_device is not None:
+            encoded = encoded.index_select(dim=-1, index=latent_ids_device)
+        z_chunks.append(encoded.detach().cpu())
+        del chunk, encoded
     z = torch.cat(z_chunks, dim=0)
     return z.reshape(patch_tokens.shape[0], patch_tokens.shape[1], -1)
 
