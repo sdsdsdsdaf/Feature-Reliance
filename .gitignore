@@ -1,18 +1,22 @@
-Data/*
-Cache/*
-/**/__pycache__/*
+# --- 데이터 / 캐시 (대용량) ---
+data/
+Data/
+Cache/
+outputs/
+wandb/
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+
+# --- 산출물 이미지 ---
 *.png
-wandb/*
-outputs/*
-.agents/*
-data
-.vscode
-third_party
-third_party/*
 
-# 2. MetaData 폴더는 제외 (살림)
-!Cache/MetaData/
+# --- 외부 코드 ---
+third_party/
 
-# 3. 그 안의 내용도 포함시키기 (중요)
-!Cache/MetaData/**
-.codex
+# --- 에디터 / 툴 ---
+.vscode/
+.agents/
+.codex/
