@@ -16,6 +16,9 @@ __pycache__/
 # --- 외부 코드 ---
 third_party/
 
+# --- 참고 논문 PDF (재다운로드 가능, 히스토리에서 제거됨) ---
+paper/refer/
+
 # --- 에디터 / 툴 ---
 .vscode/
 .agents/
