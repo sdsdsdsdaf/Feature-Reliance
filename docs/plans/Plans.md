@@ -38,7 +38,7 @@ subagent 대량 spawn 대신 5관점 분리 평가(세션에서 대부분 합의
 
 | Task | 내용 | DoD | Depends | Status |
 |---|---|---|---|---|
-| M1 SAE 추론 wrapper | `[lane:gate][tdd:required]` frozen SAE encode/decode + `token_mean`/`token_std` 정규화 왕복, FVU·L0 산출 API | 왕복 후 재구성이 `SAE_validation` 수치와 일치 · frozen weight `.grad is None` | - | cc:TODO |
+| M1 SAE 추론 wrapper | `[lane:gate][tdd:required]` frozen SAE encode/decode + `token_mean`/`token_std` 정규화 왕복, FVU·L0 산출 API | 왕복 후 재구성이 `SAE_validation` 수치와 일치 · frozen weight `.grad is None` | - | cc:완료 [89d5646 — FrozenSAE(Model/sae_runtime.py), 16 tests, FVU=3.45e-4/L0=502.5 vs ref FVU~4e-4/L0~497 on imagenette 200장] |
 | M2 gain 주입 모듈 + basis 스위치 | `[lane:gate][tdd:required]` `h⁺ = h + delta(code, gain)` 주입, block10 hook, 상류 `no_grad`+`detach`, tail만 grad, optimizer=gain only. basis 3종을 `encode(h)->code` / `delta(code,gain)->dh` 두 함수로 교체 가능하게(`latent`/`채널`/`random dictionary`) | smoke: `gain.grad≠0` · frozen `.grad is None` · **`gain=1`이 무개입 forward와 비트 동일**(residual on이면 delta가 정확히 0 — 재구성 오차가 개입하지 않음) · 3종이 동일 루프에서 교체 · `residual` on/off 전환(off는 딕셔너리 basis만, 채널은 즉시 ValueError) · **gain 외 학습 파라미터 0개 assert** | M1 | cc:TODO |
 | M3 AdaContrast 손실 스택 | `[lane:gate][tdd:required]` memory bank(클래스 균형 큐) · k-NN soft-voting pseudo-label · contrastive(same-pseudo negative 제외) · diversity(옵션 플래그). **거리는 backbone feature `h'`에서**. `buffer`·`pass`를 config 축으로 | 원본 레시피 재현 + `buffer∈{0,256,2048,full}`·`pass∈{1,2,5}`가 코드 변경 없이 전환 | M2 | cc:TODO |
 | M4 weak/strong augmentation | `[lane:fast][tdd:required]` AdaContrast 원본 aug 정책(기존 `Utils/transfrom.py`는 perturbation용이라 신규 작성) | weak/strong 배치가 동일 샘플에서 생성·shape 검증 | - | cc:TODO |
