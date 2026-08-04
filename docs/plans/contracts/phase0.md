@@ -79,29 +79,51 @@ data/imagenet-c/<corruption>/<severity>/<wnid>/*.JPEG
 `corruption` 15 test + 4 extra(`gaussian_blur`·`saturate`·`spatter`·`speckle_noise`), `severity ∈ 1..5`.
 **HP 튜닝은 4 extra에서만, 보고는 15 test에서** — spec의 ImageNet-C 규약. loader가 `split="hp"` / `"report"`로 이 구분을 강제한다.
 
-#### `colored-mnist` — 생성
+#### `colored-mnist` — 보유 (생성 완료, 실측 검증됨)
 
 ```
-data/colored-mnist/{train1,train2,test}.pt
+data/colored_mnist/{train1,train2,test}.pt        ← 디렉토리는 언더스코어
 ```
-각 `.pt` = `{"images": [N,2,14,14] float in [0,1], "labels": [N,1] float, "e": float}`.
-`e`: train1=0.2, train2=0.1, test=0.9. 2-class. group = `2*label + color`(색 채널 index).
-[scripts/download_shift_datasets.py](../../../scripts/download_shift_datasets.py)가 생성하며 IRM 구성이 검증돼 있다(색-라벨 일치율 0.795 / 0.898 / 0.100).
 
-#### `imagenet-r` / `imagenet-a` / `imagenet-sketch` — 미보유
+**정본 생성기는 [scripts/data/make_colored_mnist.py](../../../scripts/data/make_colored_mnist.py)다.** (`scripts/download_shift_datasets.py`에도 ColoredMNIST 생성 경로가 있지만 규격이 다르다 — 디스크의 데이터는 전자가 만든 것이므로 **전자를 따른다**. 후자의 ColoredMNIST 분기는 쓰지 않는다.)
+
+실측 구조 (`torch.load`로 확인):
+
+```python
+{"images": uint8[N, 3, 28, 28], "labels": int64[N]}     # "e" 키 없음
+# N: train1=25000, train2=25000, test=10000
+```
+
+- **3채널 28×28 uint8.** IRM 원본의 `2×14×14`가 아니다 — ViT-B/16(224×224×3) 파이프라인에 리사이즈로 바로 붙는 쪽을 택한 것.
+- **`e`(환경) 키가 파일에 없다.** 환경은 파일명(`train1`/`train2`/`test`)이 곧 식별자다.
+- **color는 채널에서 복원한다**: `R` 채널에 픽셀이 있으면 `color=0`, `G` 채널이면 `color=1` (`B`는 항상 0).
+  `color = (images[:, 1].sum((1,2)) > 0).long()` → `group = 2*label + color` (4 그룹).
+- 생성 파라미터: 라벨 노이즈 0.25 (전 환경 공통), color flip = train1 **0.10** / train2 **0.20** / test **0.90**.
+  → 색-라벨 일치율 ≈ **0.90 / 0.80 / 0.10**. test에서 상관이 뒤집히므로 색에 의존한 모델이 무너진다.
+- **caveat(생성기 docstring에도 있음)**: 28×28 합성 숫자는 자연 이미지가 아니라 ImageNet-ViT+SAE 스택과 맞지 않는다. **별도 소형 트랙**으로 다루고 메인 파이프라인 drop-in으로 취급하지 않는다.
+
+#### `imagenet-r` / `imagenet-a` — 보유 (검증됨) / `imagenet-sketch` — 미보유
 
 ```
-data/imagenet-{r,a,sketch}/<wnid>/*.jpg
+data/imagenet-r/imagenet-r/<wnid>/*.jpg        ← 한 겹 더 중첩돼 있다
+data/imagenet-a/imagenet-a/<wnid>/*.jpg        ← 동일
+data/imagenet-sketch/                          ← 비어 있음 (Google Drive 쿼터 실패)
 ```
-`ImageFolder` + **wnid → ImageNet-1k 인덱스 매핑**이 필수. R/A는 200 클래스 부분집합이라 1000-way head 출력을 200개 열로 **마스킹**해야 정확도가 맞는다. 이 매핑을 `Utils/imagenet_subsets.py`에 상수로 둔다.
 
-#### `imagenet-9` — 미보유
+**중첩 주의**: 배포 tarball이 자기 이름의 디렉토리를 품고 있어 `data/imagenet-r/imagenet-r/`가 된다. 루트를 하드코딩하지 말고 **`<root>/<name>/` 이 있으면 한 겹 내려가는 탐색**을 넣는다(sketch가 나중에 들어올 때 구조가 다를 수 있다).
+
+각각 wnid 디렉토리 200개(+README 1). `ImageFolder` + **wnid → ImageNet-1k 인덱스 매핑**이 필수. R/A는 200 클래스 부분집합이라 1000-way head 출력을 200개 열로 **마스킹**해야 정확도가 맞는다. 이 매핑을 `Utils/imagenet_subsets.py`에 상수로 둔다 — **디렉토리명을 정렬한 순서가 아니라 실제 wnid 목록에서 유도**한다.
+
+`imagenet-sketch`는 `status="missing"`으로 기록하고 넘어간다. 실험 5의 natural regime에서만 쓰이므로 MVP를 막지 않는다.
+
+#### `imagenet-9` — 보유 (검증됨)
 
 ```
-data/imagenet-9/<variant>/val/<class>/*.JPEG
+data/imagenet-9/bg_challenge/<variant>/val/<class>/*.JPEG    ← bg_challenge 한 겹 더
 ```
-variant = `original`·`mixed_rand`·`mixed_same`·`only_fg`·`no_fg` 등. 9-class coarse.
-`build_dataset("imagenet-9", split="mixed_rand")` 식으로 variant를 split 인자로 받는다.
+
+실측 variant: `original`, `mixed_same`, `mixed_rand`, `mixed_next`, `only_fg`, `no_fg`, `only_bg_b`, `only_bg_t`, `fg_mask`. 9-class coarse (`00_dog` … `08_...`).
+`build_dataset("imagenet-9", split="mixed_rand")` 식으로 variant를 split 인자로 받는다. `fg_mask`는 이미지가 아니라 마스크라 분류용 split 목록에서 제외한다.
 
 ### DoD 검증 스크립트
 
@@ -155,9 +177,12 @@ ignore = ["F401"]     # __init__.py re-export 대비. 필요시 파일별 noqa
 
 **검증**: `ruff check Model/ Utils/ scripts/ tests/`가 통과.
 
-### 선행 조건
+### 선행 조건 — 해소됨 (2026-08-05 실측)
 
-`pip install ruff`가 **PyPI 접속을 필요로 한다** — 현재 egress 차단으로 이 세션에서는 불가. T0.1의 데이터 다운로드와 같은 벽이다.
+`pip install ruff`는 **가능하다**(PyPI 도달 확인, `ruff-0.16.1` 설치 가능). 이전 판의 "egress 차단" 기술은 폐기한다.
+현재 `ruff`·`black` 모두 **미설치**, `pytest 9.0.2` 설치됨, Python 3.11.14.
 
 **판정 규칙**: `verdict="pass"` ⟺ `pyproject.toml`이 커밋되고 `ruff check`가 신규 경로에서 0 error.
 아무 task도 T0.2에 의존하지 않으므로(Recommended) 막히면 건너뛴다.
+
+> Plans.md의 T0.2 DoD는 `ruff check`·`black --check` 통과 **또는** 설정 파일 커밋으로 돼 있다. 위 축소 결정에 따라 **`black`은 도입하지 않고** "설정 파일 커밋" 갈래로 충족한다.

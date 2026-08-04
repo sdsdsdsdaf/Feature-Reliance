@@ -24,6 +24,31 @@ contracts/*.md       구현 계약 — 무엇을 만드는가 (시그니처/절�
 
 계약이 spec과 충돌하면 **spec이 이긴다.** 계약을 고치고 그 사유를 Plans.md `Spec delta`에 남긴다.
 
+## 실행 환경 (2026-08-05 실측)
+
+| 항목 | 상태 |
+|---|---|
+| Python | 3.11.14 |
+| torch | 2.7.0+cu126 — **`torch.cuda.is_available() == False`** |
+| timm | 1.0.26 |
+| pytest | 9.0.2 ✅ / ruff · black **미설치**(설치는 가능) |
+| PyPI egress | ✅ 도달 |
+
+> ### ⚠️ GPU를 현재 못 쓴다
+>
+> RTX 4070이 **하드웨어로는 존재**하지만(`lspci` 확인) **커널 모듈이 없다** — `/dev/nvidia*` 없음, `/proc/driver/nvidia/version` 없음, `lsmod`에 nvidia 없음, `nvidia-smi` 실패. `nvidia-driver-595-open`은 설치돼 있으나 실행 커널 `7.0.0-28-generic`용 모듈이 빌드돼 있지 않다(커널 업그레이드 후 DKMS 미재빌드로 보인다).
+>
+> **영향 범위**
+> - **T0.1 · T0.2 · M1**: CPU로 완주 가능. M1의 재구성 검증은 소규모(수백 장) smoke이므로 느릴 뿐 막히지 않는다.
+> - **T1.1 이후 전부**: 불가. T1.1만 해도 38k 이미지 forward이고, Phase 2는 온라인 적응 학습이다.
+>
+> **복구** (sudo 필요, 이 계약 범위 밖):
+> ```bash
+> sudo apt install --reinstall nvidia-dkms-595-open   # 또는 dkms autoinstall
+> sudo modprobe nvidia && nvidia-smi
+> ```
+> 실험 task를 dispatch하기 전에 `torch.cuda.is_available()`가 `True`인지 반드시 확인한다.
+
 ## 공통 규약
 
 **시그니처 작성 규칙** — 시그니처만 나열하지 않는다. 블록만 읽고도 무엇을 하는 함수인지 알 수 있어야 한다.
