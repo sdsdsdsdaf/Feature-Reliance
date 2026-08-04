@@ -45,7 +45,7 @@ subagent 대량 spawn 대신 5관점 분리 평가(세션에서 대부분 합의
 | M4 weak/strong augmentation | `[lane:fast][tdd:required]` AdaContrast 원본 aug 정책(기존 `Utils/transfrom.py`는 perturbation용이라 신규 작성) | weak/strong 배치가 동일 샘플에서 생성·shape 검증 | - | cc:완료 [9faf73a+713c37e — Utils/tta_transforms.py, 7 tests, 정규화 상수는 백본 인자로 해결] |
 | M5 anchor 정규화 항 | `[lane:fast][tdd:required]` `{off, 균일 λ‖g−1‖², c_k 가중 λΣc_k(g_k−1)²}` 스위치 | 3 모드 전환 + `λ=0`이 off와 수치 동일 | M2, M6 | cc:TODO |
 | M6 `c_k` 진단 모듈 | `[lane:gate][tdd:required]` offline·source 라벨. `c_k = acc(source) − acc(source \| latent k off)` | `c_k` 벡터 산출·저장 + latent off 경로가 재구성 기여만 제거하는지 검증 | M1, **M2** | cc:TODO |
-| M7 FVU gate | `[lane:gate][tdd:required]` VS2식 런타임 게이트 — FVU가 임계 초과면 개입 보류/약화. **⚠️ 전제가 실측에서 무너졌다 — T1.1 확정 전까지 착수 보류** | 임계 초과 배치에서 gain 갱신이 실제로 억제됨을 로그로 확인 | M1, M2, **T1.1** | blocked (예비 probe에서 FVU가 severity에 **역방향**·임계 초과 셀 0개 → 게이트 발동 불가. T1.1이 확정하면 Optional 강등) |
+| M7 FVU gate | `[lane:gate][tdd:required]` VS2식 런타임 게이트. **⛔ T1.1이 전제를 반증했다 — 구현하지 않는다** | (해당 없음 — 게이트가 발동할 수 없음이 실측으로 확정) | M1, M2, T1.1 | **Optional 강등 [T1.1 8c56764]** — 75셀 전부 임계 미달, severity 단조증가 0/15. 계기를 `L0` 수십 급으로 올린 뒤 재측정할 때만 부활 |
 | M8 online TTA runner | `[lane:gate][tdd:required]` 스트림 배치별 1-step 적응, 평가 프로토콜 2종(online 누적 / adapt-then-eval) 병기 | 1 corruption smoke에서 no-adapt 대비 acc 개선 로그 + 두 프로토콜 수치 동시 출력 | M2, M3, M4 | cc:TODO |
 
 → 구현 계약: **[contracts/phaseM.md](contracts/phaseM.md)** (class/function 시그니처·동작·불변식·엣지 케이스)
@@ -63,7 +63,7 @@ assert trainable == ["gain"], f"gain 외 학습 파라미터 발견: {trainable}
 
 | Task | 내용 | DoD | Depends | Status |
 |---|---|---|---|---|
-| T1.1 실험 1 — SAE 계기+FVU+source ablation | `[lane:gate][tdd:skip:analysis]` in-domain vs OOD 재구성/sparsity, FVU 게이트 임계, SAE-source(source/proxy/public) ablation | FVU-vs-severity 곡선 + 게이트 임계값 + source/proxy/public 재구성 비교표 산출·저장 | M1 | cc:TODO |
+| T1.1 실험 1 — SAE 계기+FVU+source ablation | `[lane:gate][tdd:skip:analysis]` in-domain vs OOD 재구성/sparsity, FVU 게이트 임계, SAE-source(source/proxy/public) ablation | FVU-vs-severity 곡선 + 게이트 임계값 + source/proxy/public 재구성 비교표 산출·저장 | M1 | cc:완료 [8c56764 — 75셀×512장 실행. **verdict=fail**: cells_above_gate 0/75, severity 단조증가 0/15. proxy·public ablation 미측정(ckpt 없음)] |
 | T1.2 실험 2 — 개입 sanity+capacity | `[lane:gate][tdd:required]` no-op 항등성·grad 경로 assert·gain vs LN affine capacity 상한 | assert 3종 통과 + gain/affine capacity 상한표 산출. 격차 기록(대가로 보고할지, FB-cluster로 대응할지 판단) | M2 | cc:TODO |
 | T1.3 실험 3 — spurious/causal 분리 | `[lane:gate][tdd:skip:analysis]` ①정답: Waterbirds `y`/`place` 층화 AUC(`spur_j`/`caus_j`) + permutation max-null 임계 → 축별 `purity_rate`(SAE vs PCA vs random). ②진단: 라벨없는 `s_k`(+`c_k^train`/`c_k^bal`)가 ①을 복원하는지 AP로 검정. ③해석: 순수 후보 40개에 `broden.py` IoU로 개념 이름 부여(+ 실험 7용 alive latent 전체 IoU 부산물) | (A) 축 3종 `purity_rate`·`sel_j` 히스토그램·permutation p값 표 산출 + (B) `s_k`→순수-spurious 랭킹 AP와 무작위 baseline 대비표, `corr(c_k^train/^bal, caus_j)` 산출 + (C) 후보 Broden 개념·category 분포 표 산출. `verdict`는 (A)·(B) 두 조건으로 자동 판정 | T0.1, M1, M6 | cc:TODO |
 | T1.4a 실험 4A — 정적 basis head-to-head | `[lane:gate][tdd:skip:analysis]` `latent gain` vs `채널 gain`(SAE 미경유, 768) vs `random dictionary gain`(동일 K·동일 sparsity). 주입 지점·손실(AdaContrast 고정)·step 동일, **lr은 arm별 스윕 후 arm별 best 보고**, anchor는 전 arm 균일 고정 | 3 arm worst-group/acc 표(arm별 best-lr) + CKA/JS drift 병기. **채널 gain 대비 우위 / random dictionary 대비 우위** 판정 산출 | T0.1, M2, M3, M4, T1.2 | cc:TODO |
@@ -91,7 +91,7 @@ assert trainable == ["gain"], f"gain 외 학습 파라미터 발견: {trainable}
 ## 우선순위 분류
 - **Required**: T0.1, **M1~M6·M8(방법 구현)**, T1.1, T1.2, T1.3, T1.4a, T1.4b, T2.1, T2.2, T2.3 — thesis 성립의 최소 골격(방법 구현→진단→메커니즘→basis→crossover→정체성). **Phase M이 없으면 Phase 1·2가 전부 착수 불가.**
 - **Recommended**: T0.2(lint 위생), T3.1(안정성 fallback).
-- **보류(blocked)**: **M7** — FVU 게이트. 예비 실측에서 전제가 무너져 T1.1 확정까지 착수 안 함. 확정 시 Optional 강등 + 부정 결과로 보고.
+- **Optional(강등 확정)**: **M7** — FVU 게이트. T1.1이 전제를 반증했다(cells_above_gate 0/75, severity 단조증가 0/15). **구현하지 않고 부정 결과로 보고한다.** 계기를 `L0` 수십 급으로 올린 뒤에만 재고.
 - **Optional**: T3.2(Paper B continual — 사실상 2번째 논문, 여력 시).
 - **Reject**: ImageNet-C on-the-fly 재생성(버전 드리프트로 baseline 비교 불가) — precomputed 고정으로 대체.
 

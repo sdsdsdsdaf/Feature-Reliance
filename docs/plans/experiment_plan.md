@@ -131,7 +131,31 @@ x_t ─▶ ViT block0..10 ─(no_grad)─▶ h ─▶ SAE.encode ─(detach)─�
 ## 예상결과
 - source에선 FVU 낮고 sparse 유지. corruption severity↑ → FVU 단조 증가(특히 noise류). **easy corruption은 완만, 강한 shift에서 급증**하는 곡선 → FVU 게이트의 정당성 확보. 게이트 밖(신뢰 가능) 구역에서만 이후 개입을 신뢰한다는 경계가 서면 성공. **ablation: proxy/public SAE로도 재구성·게이트가 유지되면 source-free 방어 완료.**
 
-> ### ⚠️ 2026-08-05 예비 실측 — 위 기대와 **반대** 방향이 관측됐다
+> ### ⛔ 2026-08-05 확정 — 위 기대는 **반증됐다** (실험 1 실행 완료, `verdict = fail`)
+>
+> 15 corruption × 5 severity = 75셀, 셀당 512장, in-domain 2,048장 전체 실행 결과:
+>
+> | | |
+> |---|---|
+> | in-domain (ImageNet-1k val) | FVU 1.526e-03, L0 786.2, cosine 0.9996, acc 0.858 |
+> | 게이트 임계 (in-domain per-image FVU의 p95) | 2.960e-03 |
+> | **임계 초과 셀** | **0 / 75** |
+> | severity 단조 **증가** corruption | **0 / 15** |
+> | `mean_recon_cost` | +0.0000 |
+>
+> | severity | 1 | 2 | 3 | 4 | 5 |
+> |---|---|---|---|---|---|
+> | FVU | 1.650e-03 | 1.569e-03 | 1.504e-03 | 1.395e-03 | **1.263e-03** |
+> | acc | 0.855 | 0.823 | 0.798 | 0.747 | **0.647** |
+>
+> **정확도가 21%p 무너지는 동안 FVU는 24% 좋아진다.** FVU는 shift를 추적하지 못하고 입력 복잡도를 잰다.
+>
+> **→ `M7` FVU 게이트를 구현하지 않는다(Optional 강등).** 이건 SAE 품질 문제가 아니다 — cosine 0.9996, 재구성 대가 0으로 계기 충실도는 매우 좋다. 무너진 건 **VS2식 게이트 설계의 이식 가능성**이고, 그것을 **부정 결과로 보고한다.** 계기를 `L0` 수십 급으로 올린 뒤 재측정할 여지는 남긴다.
+>
+> 산출물 `outputs/experiments/T1.1/`, 진입점 `experiments/exp1_sae_instrument.py`.
+> **미완**: `source_ablation`의 proxy·public이 `null`이다(ckpt 미보유) → **strict-no-source 방어는 아직 안 섰다.**
+>
+> <details><summary>선행 예비 probe (전체 실행으로 대체됨)</summary>
 >
 > [scripts/probe_fvu_shift.py](../../scripts/probe_fvu_shift.py)로 3 corruption × sev{1,3,5}, 셀당 128장을 재본 결과:
 >
@@ -147,6 +171,8 @@ x_t ─▶ ViT block0..10 ─(no_grad)─▶ h ─▶ SAE.encode ─(detach)─�
 > 예비 측정이므로 **정식 실험 1(15×5, 셀당 512장)이 확정 근거**다. 확정되면 `M7` FVU 게이트를 Optional로 강등하고, 이 결과를 **부정 결과로 보고**한다 — VS2식 FVU 게이트가 ViT+PatchSAE 계열에 그대로 이식되지 않는다는 것 자체가 결과다. 재구성 품질(cosine 0.9998)은 오히려 매우 좋으므로 "SAE가 계기로 부적합"이라는 결론이 **아니다**.
 >
 > 부수 발견: **in-domain FVU 기준선이 데이터에 따라 5배 흔들린다**(ImageNet-1k val `1.6e-3` vs imagenette `3.4e-4`). 게이트 임계를 **어느 분포에서 뽑았는지 반드시 명시**한다.
+>
+> </details>
 
 ---
 

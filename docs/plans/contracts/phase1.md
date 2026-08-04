@@ -69,9 +69,44 @@ python -m experiments.exp1_sae_instrument \
 `figures/fvu_vs_severity.png` — corruption별 곡선.
 `figures/acc_vs_severity.png` — `acc_orig`/`acc_recon` 두 곡선을 겹쳐 그려 대가가 severity에 따라 벌어지는지 본다.
 
-### ⚠️ 예비 probe 결과 (2026-08-05) — `fail` 방향이 이미 관측됐다
+### ✅ 확정 결과 (2026-08-05, 정식 실행) — `verdict = fail`
 
-정식 T1.1 전에 [scripts/probe_fvu_shift.py](../../../scripts/probe_fvu_shift.py)로 방향만 싸게 확인했다(셀당 128장, 3 corruption × sev {1,3,5}). 결과는 `outputs/experiments/T1.1/probe_fvu_shift.json`.
+**15 test corruption × 5 severity = 75셀, 셀당 512장, in-domain 2,048장으로 실행 완료.** 예비 probe의 방향이 전체 규모에서 그대로 확인됐다.
+
+| | |
+|---|---|
+| in-domain (ImageNet-1k val, n=2048) | FVU **1.526e-03**, L0 786.2, cosine 0.9996, acc 0.858 |
+| 게이트 임계 (in-domain 이미지단위 FVU의 p95) | **2.960e-03** |
+| **`cells_above_gate`** | **0 / 75** |
+| severity 단조 **증가** corruption | **0 / 15** |
+| `mean_recon_cost` | **+0.0000** (SAE 왕복이 정확도로 치르는 대가가 없다) |
+| `fvu_vs_dacc_pearson` | 0.158 (약하고, 기대와 부호도 어긋난다) |
+
+**severity가 오를수록 정확도는 무너지는데 FVU는 좋아진다** — 이 표가 결론이다.
+
+| severity | FVU | L0 | acc |
+|---|---|---|---|
+| 1 | 1.650e-03 | 773.1 | 0.855 |
+| 2 | 1.569e-03 | 758.4 | 0.823 |
+| 3 | 1.504e-03 | 752.5 | 0.798 |
+| 4 | 1.395e-03 | 740.5 | 0.747 |
+| 5 | **1.263e-03** | 731.9 | **0.647** |
+
+정확도가 21%p 붕괴하는 동안 FVU는 오히려 24% 낮아진다. **FVU는 shift를 전혀 추적하지 못한다.**
+
+**결론**: FVU는 이 조합(ViT-B/16 + `L0≈497~800` PatchSAE)에서 shift 감지기가 아니라 **입력 복잡도 측정기**다. 손상된 이미지는 고주파가 뭉개져 딕셔너리가 맞추기 더 쉬워지고, L0도 함께 떨어진다(786 → 732).
+
+**이건 SAE가 나쁘다는 뜻이 아니다.** cosine이 0.9996이고 `recon_cost`가 0이다 — 계기로서의 충실도는 매우 좋다. 무너진 건 **VS2식 FVU 게이트라는 설계**이고, 그게 ViT+PatchSAE 계열에 그대로 이식되지 않는다는 것 자체가 보고할 결과다.
+
+**→ [M7 FVU gate를 Optional로 강등한다.](../Plans.md)** `L0` 수십 급 계기로 올린 뒤 재측정할 여지는 남긴다.
+
+**미측정**: `source_ablation`의 `proxy`·`public`은 `null`이다(해당 ckpt가 없고 학습·수급이 T1.1 범위 밖). `unknown_fields`에 사유가 기록돼 있다. **strict-no-source 방어는 아직 미완**이므로 별도 task가 필요하다.
+
+산출물: `outputs/experiments/T1.1/{result.json,result.md,figures/}`, 진입점 [experiments/exp1_sae_instrument.py](../../../experiments/exp1_sae_instrument.py).
+
+### 예비 probe (2026-08-05, 위 결과로 대체됨)
+
+정식 T1.1 전에 [scripts/probe_fvu_shift.py](../../../scripts/probe_fvu_shift.py)로 방향만 싸게 확인했던 것(셀당 128장, 3 corruption × sev {1,3,5}). 결과는 `outputs/experiments/T1.1/probe_fvu_shift.json`. 전체 실행이 이를 확증했으므로 참고용으로만 남긴다.
 
 | condition | FVU | in-domain 대비 | L0 |
 |---|---|---|---|
