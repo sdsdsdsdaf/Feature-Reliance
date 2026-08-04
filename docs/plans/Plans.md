@@ -28,8 +28,8 @@ subagent 대량 spawn 대신 5관점 분리 평가(세션에서 대부분 합의
 
 | Task | 내용 | DoD | Depends | Status |
 |---|---|---|---|---|
-| T0.1 데이터 수급 | `[lane:gate][tdd:skip:data-acquisition]` ColoredMNIST·ImageNet-R/Sketch/A·ImageNet-9(BG) 확보(**Waterbirds는 보유** `data/waterbirds`). ImageNet-C는 보유분(precomputed) 사용, **재생성 금지** | 각 데이터셋 loader가 배치 반환 + 샘플 수·클래스 수 로그 출력. ImageNet-C loader가 `corruption/severity/class` 경로에서 로드 | - | cc:TODO |
-| T0.2 lint/format baseline | `[lane:fast][tdd:skip:setup]` ruff/black baseline 확인·설정 | `ruff check`·`black --check` 통과 or 설정 파일 커밋 | - | cc:TODO |
+| T0.1 데이터 수급 | `[lane:gate][tdd:skip:data-acquisition]` ColoredMNIST·ImageNet-R/Sketch/A·ImageNet-9(BG) 확보(**Waterbirds는 보유** `data/waterbirds`). ImageNet-C는 보유분(precomputed) 사용, **재생성 금지** | 각 데이터셋 loader가 배치 반환 + 샘플 수·클래스 수 로그 출력. ImageNet-C loader가 `corruption/severity/class` 경로에서 로드 | - | cc:완료 [75ddd31 — `Utils/datasets.py` `build_dataset()`, 29 tests, sketch만 `missing`] |
+| T0.2 lint/format baseline | `[lane:fast][tdd:skip:setup]` ruff/black baseline 확인·설정 | `ruff check`·`black --check` 통과 or 설정 파일 커밋 | - | cc:완료 [1f41202 — `pyproject.toml` ruff `select=["F"]`, black 미도입(계약대로), 기존 11건은 per-file-ignores 기준선] |
 
 ## Phase M — 방법 구현 (논문에서 주장할 방법 그 자체)
 
