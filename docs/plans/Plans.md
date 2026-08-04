@@ -12,6 +12,7 @@ Purpose: `experiment_plan.md`(= product/spec contract, SSOT)를 실행 가능한
 - root `spec.md` 없음 → 본 연구의 product contract는 `experiment_plan.md`를 SSOT로 채택(consumer 승인/수정만).
 - **2026-08-04 개정 (실험 4)**: (1) 실험 4를 **4A(basis head-to-head) / 4B(SAE arm 설계 ablation)** 로 분리 — 통제 3축(`c_k`·거리공간·residual)이 SAE arm 위에서만 정의돼 5×3 격자가 성립하지 않았음. (2) arm 목록에서 **`PCA-dim gain`·`PLPD-select` 삭제** — TACT는 backprop-free method, DeYO는 샘플 필터로 교체할 적응 파라미터가 없음 → 실험 5 baseline으로 이관. (3) `채널 affine(Tent)` → **`채널 gain`**(동일 주입 지점, 단일 변수화), **`random dictionary gain`** 신설. (4) 실험 4 손실을 **AdaContrast로 고정**(거리공간 축 성립 조건). (5) 주입 수식에 `token_std` **역정규화 반영**. (6) 사실 정정: expansion **16**(32 아님), Waterbirds **보유**(`data/waterbirds`).
 - **2026-08-05 개정 (실험 3 재정식화)**: 실험 3이 **순환논증 구조**였음 — `s_k`·`c_k`로 후보를 뽑아놓고 그걸 spurious라 부른 뒤 Broden IoU로 확인하는 형태라, "무엇이 spurious인가"의 정답이 진단 자신에게서 나왔다. 이에 따라 (1) **정답을 Waterbirds `y`/`place` 라벨로 분리** — `y`/`place` **층화 AUC**로 `spur_j`/`caus_j`를 정의(층화 없이는 95% 상관 때문에 배경 탐지기가 causal로 보임). (2) **주 지표를 `purity_rate`(분리도)로 교체**, Broden IoU는 **해석 도구로 강등**(판정 게이트 아님). (3) 대조축 공정성 문제 해소 — AUC가 순위 기반이라 **부호·스케일·마스크 밀도 정합이 불필요**해지고(`ConceptAxis`의 PCA `2d` 부호 처리 삭제 → `d`), **permutation max-null 임계**가 pool 크기(SAE ~6,000 vs PCA 768) 비대칭을 자동 보정, 비율 지표라 pool 크기가 상쇄. (4) `s_k` 정의 수정 — 구 정의 `|firing(place=1)−firing(place=0)|`은 **정답 라벨을 진단에 흘려 넣는 것**이라 폐기하고 plan.md §2.1의 도메인 단위 정의(`|firing(target)−firing(source)|`)로 복귀. (5) **`c_k^train`/`c_k^bal` 병기** — 편향 source에서 `c_k`가 배경을 causal로 오판하는 폭이 plan.md §7 리스크의 실측값. (6) **판정 명제를 (A) 분리 / (B) 진단 타당성 / (C) 해석성으로 분해** — (A) 실패 = thesis 재검토, (A) 통과·(B) 실패 = thesis 생존하나 `c_k` anchor 설계·"test time에 spurious 겨냥" 서술 전면 수정(T1.4b `anchor=ck` 근거 상실), (C)는 판정 미참여. (7) T3.1 `broden` 군집이 요구하는 **alive latent 전체 IoU**를 T1.3 부산물(`full_latent_iou.json`)로 명시.
+- **2026-08-05 실측 (M7 FVU 게이트 전제 붕괴 관측)**: 정식 T1.1 전 예비 probe([scripts/probe_fvu_shift.py](../../scripts/probe_fvu_shift.py), 셀당 128장 × 3 corruption × sev{1,3,5})에서 **FVU가 severity에 대해 단조 증가가 아니라 단조 감소**했고, OOD 9개 셀 전부가 in-domain보다 **낮았다**(0.47~0.57×). 임계 초과 셀 0개 → **게이트가 발동할 수 없다.** 손상 이미지는 고주파가 뭉개져 활성이 평범해지고 딕셔너리가 맞추기 더 쉬워지기 때문으로 보인다(L0도 793→650~670 동반 하락). 이에 따라 (1) **M7을 `blocked`로 전환**하고 Depends에 T1.1 추가 — T1.1이 확정하기 전엔 착수하지 않는다. (2) **T2.2의 Depends에서 M7을 조건부로 강등**(게이트 없이도 진행 가능). (3) 부수 발견: **in-domain FVU 기준선이 데이터에 따라 5배 흔들린다**(ImageNet-1k val `1.6e-3` vs imagenette `3.4e-4`) → T1.1은 게이트 임계를 뽑은 분포를 반드시 명시해야 한다. (4) 확정 시 이건 **논문에 실을 부정 결과**다 — VS2식 FVU 게이트가 ViT+PatchSAE 계열에 그대로 이식되지 않는다는 보고. 재구성 품질 자체(cosine 0.9998)는 오히려 매우 좋으므로 "SAE가 나쁘다"는 결론이 아니다. 계기를 `L0` 수십 급으로 올린 뒤 재측정할 여지는 남긴다.
 - **2026-08-04 개정 (방법 구현)**: (1) **Phase M 신설** — 기존 ledger가 실험 task만 담고 있어 논문에서 주장할 방법 자체의 구현(SAE 추론 wrapper·gain 주입·AdaContrast 손실 스택·aug·anchor·`c_k`·FVU gate·runner)이 T0.3/T2.1 두 줄에 묻혀 있었음. M1~M8로 분해하고 실험 task 의존을 전부 재배선. (2) **T2.1을 baseline 스위트로 교체** — 실험 5가 baseline 9종을 요구하는데 구현 task가 없었음(보유는 `third_party/ReservoirTTA`와 BN 전용 Tent뿐). (3) **adaptor 하이브리드 언급 전면 삭제**(plan.md 4곳·experiment_plan.md 3곳) — v1은 **gain 단독**이고 네트워크에 새 모듈을 넣지 않는 구조. capacity 부족분은 FB-cluster·손실 설계로 대응하고 남는 격차는 정직하게 보고.
 
 ## team_validation_mode: manual-pass
@@ -44,7 +45,7 @@ subagent 대량 spawn 대신 5관점 분리 평가(세션에서 대부분 합의
 | M4 weak/strong augmentation | `[lane:fast][tdd:required]` AdaContrast 원본 aug 정책(기존 `Utils/transfrom.py`는 perturbation용이라 신규 작성) | weak/strong 배치가 동일 샘플에서 생성·shape 검증 | - | cc:TODO |
 | M5 anchor 정규화 항 | `[lane:fast][tdd:required]` `{off, 균일 λ‖g−1‖², c_k 가중 λΣc_k(g_k−1)²}` 스위치 | 3 모드 전환 + `λ=0`이 off와 수치 동일 | M2, M6 | cc:TODO |
 | M6 `c_k` 진단 모듈 | `[lane:gate][tdd:required]` offline·source 라벨. `c_k = acc(source) − acc(source \| latent k off)` | `c_k` 벡터 산출·저장 + latent off 경로가 재구성 기여만 제거하는지 검증 | M1 | cc:TODO |
-| M7 FVU gate | `[lane:gate][tdd:required]` VS2식 런타임 게이트 — FVU가 임계 초과면 개입 보류/약화 | 임계 초과 배치에서 gain 갱신이 실제로 억제됨을 로그로 확인 | M1, M2 | cc:TODO |
+| M7 FVU gate | `[lane:gate][tdd:required]` VS2식 런타임 게이트 — FVU가 임계 초과면 개입 보류/약화. **⚠️ 전제가 실측에서 무너졌다 — T1.1 확정 전까지 착수 보류** | 임계 초과 배치에서 gain 갱신이 실제로 억제됨을 로그로 확인 | M1, M2, **T1.1** | blocked (예비 probe에서 FVU가 severity에 **역방향**·임계 초과 셀 0개 → 게이트 발동 불가. T1.1이 확정하면 Optional 강등) |
 | M8 online TTA runner | `[lane:gate][tdd:required]` 스트림 배치별 1-step 적응, 평가 프로토콜 2종(online 누적 / adapt-then-eval) 병기 | 1 corruption smoke에서 no-adapt 대비 acc 개선 로그 + 두 프로토콜 수치 동시 출력 | M2, M3, M4 | cc:TODO |
 
 → 구현 계약: **[contracts/phaseM.md](contracts/phaseM.md)** (class/function 시그니처·동작·불변식·엣지 케이스)
@@ -75,7 +76,7 @@ assert trainable == ["gain"], f"gain 외 학습 파라미터 발견: {trainable}
 | Task | 내용 | DoD | Depends | Status |
 |---|---|---|---|---|
 | T2.1 baseline 스위트 | `[lane:gate][tdd:required]` 실험 5가 요구하는 9종을 **동일 백본(ViT-B/16)·동일 스트림**에서 재현: No-adapt·Tent·EATA·SAR·DeYO·TACT·CoTTA·AdaContrast·ReservoirTTA. 현재 보유는 `third_party/ReservoirTTA`와 **BN 전용** `reservoir_sae/tta.py`뿐이라 **ViT(LN)용 재구현 필요** | 9종이 동일 인터페이스로 1 corruption smoke 통과 + 공개 보고치와 자릿수 일치 확인 | T0.1, M8 | cc:TODO |
-| T2.2 실험 5 — 메인 crossover | `[lane:release][tdd:skip:analysis]` 전 baseline × regime(spurious/natural/corruption/wild). HP는 4-extra holdout에서 선택 | regime별 acc/worst-group/acc-vs-time 표 + baseline 비교 + HP 민감도 그래프(평탄) 산출 | T2.1, M7, T1.4a | cc:TODO |
+| T2.2 실험 5 — 메인 crossover | `[lane:release][tdd:skip:analysis]` 전 baseline × regime(spurious/natural/corruption/wild). HP는 4-extra holdout에서 선택 | regime별 acc/worst-group/acc-vs-time 표 + baseline 비교 + HP 민감도 그래프(평탄) 산출 | T2.1, T1.4a (~~M7~~ — 게이트 전제가 무너지면 M7 없이 진행) | cc:TODO |
 | T2.3 실험 6 — 프로토콜·메모리 ablation | `[lane:gate][tdd:skip:analysis]` `buffer∈{0,256,2048,full}`×`pass∈{single,multi-epoch}` sweep, in-batch 성립·TTA↔SFDA 위치 | buffer/pass sweep 표 + `buffer=0·single-pass`(순수 TTA) 성립 여부 판정 산출 | M3, M8 | cc:TODO |
 
 ## Phase 3 — Extend (보강·확장)
@@ -88,8 +89,9 @@ assert trainable == ["gain"], f"gain 외 학습 파라미터 발견: {trainable}
 | T3.2 실험 8 — continual/recurring (Paper B) | `[lane:release][tdd:skip:analysis]` SAE descriptor 라우팅 + 도메인당 gain 저장/재로드, forgetting·mem/FLOPs vs ReservoirTTA. 기존 `reservoir_sae/simple_reservoir.py`(PrototypeReservoir) 재사용 | forgetting Δ·acc-vs-time·도메인당 mem/FLOPs 대조표 + routing 정확도 산출 | M8, T2.1 | cc:TODO |
 
 ## 우선순위 분류
-- **Required**: T0.1, **M1~M8(방법 구현 전체)**, T1.1, T1.2, T1.3, T1.4a, T1.4b, T2.1, T2.2, T2.3 — thesis 성립의 최소 골격(방법 구현→진단→메커니즘→basis→crossover→정체성). **Phase M이 없으면 Phase 1·2가 전부 착수 불가.**
+- **Required**: T0.1, **M1~M6·M8(방법 구현)**, T1.1, T1.2, T1.3, T1.4a, T1.4b, T2.1, T2.2, T2.3 — thesis 성립의 최소 골격(방법 구현→진단→메커니즘→basis→crossover→정체성). **Phase M이 없으면 Phase 1·2가 전부 착수 불가.**
 - **Recommended**: T0.2(lint 위생), T3.1(안정성 fallback).
+- **보류(blocked)**: **M7** — FVU 게이트. 예비 실측에서 전제가 무너져 T1.1 확정까지 착수 안 함. 확정 시 Optional 강등 + 부정 결과로 보고.
 - **Optional**: T3.2(Paper B continual — 사실상 2번째 논문, 여력 시).
 - **Reject**: ImageNet-C on-the-fly 재생성(버전 드리프트로 baseline 비교 불가) — precomputed 고정으로 대체.
 

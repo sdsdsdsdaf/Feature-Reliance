@@ -69,11 +69,32 @@ python -m experiments.exp1_sae_instrument \
 `figures/fvu_vs_severity.png` — corruption별 곡선.
 `figures/acc_vs_severity.png` — `acc_orig`/`acc_recon` 두 곡선을 겹쳐 그려 대가가 severity에 따라 벌어지는지 본다.
 
+### ⚠️ 예비 probe 결과 (2026-08-05) — `fail` 방향이 이미 관측됐다
+
+정식 T1.1 전에 [scripts/probe_fvu_shift.py](../../../scripts/probe_fvu_shift.py)로 방향만 싸게 확인했다(셀당 128장, 3 corruption × sev {1,3,5}). 결과는 `outputs/experiments/T1.1/probe_fvu_shift.json`.
+
+| condition | FVU | in-domain 대비 | L0 |
+|---|---|---|---|
+| **in-domain** (ImageNet-1k val) | 1.626e-03 | 1.00× | 793.3 |
+| gaussian_noise sev1 / 3 / 5 | 9.19 / 8.89 / 8.57 e-04 | 0.57 / 0.55 / **0.53×** | 666 / 650 / 671 |
+| fog sev1 / 3 / 5 | 8.90 / 8.58 / 7.92 e-04 | 0.55 / 0.53 / **0.49×** | 736 / 794 / 802 |
+| glass_blur sev1 / 3 / 5 | 9.21 / 8.72 / 7.66 e-04 | 0.57 / 0.54 / **0.47×** | 684 / 663 / 665 |
+
+**FVU가 severity에 따라 올라가지 않고 내려간다.** 9개 셀 전부 in-domain보다 낮고(0.47~0.57×), 3개 corruption 계열 **전부**에서 severity에 대해 단조 **감소**한다. `n_cells_above_in_domain_fvu = 0`, `n_corruptions_monotonically_increasing = 0/3`.
+
+**해석**: 손상된 이미지는 고주파 디테일이 뭉개져 활성이 더 평범해지고, 딕셔너리가 맞추기 **더 쉬운** 입력이 된다(L0도 793 → 650~670으로 함께 떨어진다). 즉 FVU는 여기서 shift 감지기가 아니라 **입력 복잡도 측정기**로 작동한다.
+
+**주의**
+- 이건 T1.1이 **아니다.** 셀당 128장·3 corruption뿐이라 판정 근거로 쓰지 않는다. 다만 방향이 9/9 셀에서 예외 없고 효과가 2배라 정식 측정에서 뒤집힐 가능성은 낮다.
+- **in-domain 기준선이 데이터에 따라 크게 흔들린다** — ImageNet-1k val에서 `1.6e-3`인데 imagenette(10 클래스)에서는 `3.4e-4`로 **약 5배** 차이다(M1 산출물). 정식 T1.1은 게이트 임계를 **어느 분포에서** 뽑는지를 반드시 고정해 기록해야 한다.
+- `L0 ≈ 497~800`짜리 무딘 계기 탓일 수 있다. PatchSAE급(L0 수십)으로 올리면 달라질 여지는 남아 있다.
+
 ### 판정 규칙
 
 - `pass`: FVU가 severity에 대해 **단조 증가**하고(corruption의 ≥80%에서), 게이트 임계 밖 셀이 존재한다.
 - **`fail`: 전 OOD 셀의 FVU가 임계 이하** → 게이트가 한 번도 안 걸린다는 뜻이고, M7이 무의미해진다.
-  현 ckpt는 in-domain FVU가 `4e-4`로 극히 낮아(거의 항등 사상) **이 실패 모드가 실재한다.** 이 경우 M7을 Optional로 내리고 그 사실을 spec에 반영한다.
+  **위 probe에서 이 실패 모드가 실제로 관측됐다**(임계 초과 셀 0개, 게다가 방향이 반대). 정식 측정에서 확정되면 **M7을 Optional로 강등**하고 그 사실을 spec에 반영한다.
+- **`fail`은 "SAE가 나쁘다"가 아니라 "게이트라는 설계가 이 백본·SAE 조합에서 성립하지 않는다"는 뜻이다.** 재구성 품질(FVU 1e-3, cosine 0.9998)은 오히려 매우 좋다. 부정 결과 그대로 논문에 싣는다 — VS2식 FVU 게이트가 ViT+PatchSAE 계열에 그대로 이식되지 않는다는 것 자체가 보고할 값어치가 있다.
 - `proxy`/`public` 조건이 `source`와 같은 결론을 주면 "source 의존은 편의일 뿐 필수 아님"이 입증된다(strict-no-source 방어).
 
 **비용**: forward-only. 15×5×512 ≈ 38k 이미지 + in-domain. 학습 없음.

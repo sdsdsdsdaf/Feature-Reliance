@@ -131,6 +131,23 @@ x_t ─▶ ViT block0..10 ─(no_grad)─▶ h ─▶ SAE.encode ─(detach)─�
 ## 예상결과
 - source에선 FVU 낮고 sparse 유지. corruption severity↑ → FVU 단조 증가(특히 noise류). **easy corruption은 완만, 강한 shift에서 급증**하는 곡선 → FVU 게이트의 정당성 확보. 게이트 밖(신뢰 가능) 구역에서만 이후 개입을 신뢰한다는 경계가 서면 성공. **ablation: proxy/public SAE로도 재구성·게이트가 유지되면 source-free 방어 완료.**
 
+> ### ⚠️ 2026-08-05 예비 실측 — 위 기대와 **반대** 방향이 관측됐다
+>
+> [scripts/probe_fvu_shift.py](../../scripts/probe_fvu_shift.py)로 3 corruption × sev{1,3,5}, 셀당 128장을 재본 결과:
+>
+> | | FVU | in-domain 대비 |
+> |---|---|---|
+> | in-domain (ImageNet-1k val) | 1.626e-03 | 1.00× |
+> | gaussian_noise sev1→5 | 9.19e-04 → 8.57e-04 | 0.57× → 0.53× |
+> | fog sev1→5 | 8.90e-04 → 7.92e-04 | 0.55× → 0.49× |
+> | glass_blur sev1→5 | 9.21e-04 → 7.66e-04 | 0.57× → 0.47× |
+>
+> **FVU가 단조 증가가 아니라 단조 감소하고, OOD 9개 셀 전부가 in-domain보다 낮다.** 임계 초과 셀 0개 → 게이트가 발동할 수 없다. 손상 이미지는 고주파가 뭉개져 활성이 평범해지고 딕셔너리가 맞추기 더 쉬워지기 때문으로 보인다(L0도 793→650~670 동반 하락).
+>
+> 예비 측정이므로 **정식 실험 1(15×5, 셀당 512장)이 확정 근거**다. 확정되면 `M7` FVU 게이트를 Optional로 강등하고, 이 결과를 **부정 결과로 보고**한다 — VS2식 FVU 게이트가 ViT+PatchSAE 계열에 그대로 이식되지 않는다는 것 자체가 결과다. 재구성 품질(cosine 0.9998)은 오히려 매우 좋으므로 "SAE가 계기로 부적합"이라는 결론이 **아니다**.
+>
+> 부수 발견: **in-domain FVU 기준선이 데이터에 따라 5배 흔들린다**(ImageNet-1k val `1.6e-3` vs imagenette `3.4e-4`). 게이트 임계를 **어느 분포에서 뽑았는지 반드시 명시**한다.
+
 ---
 
 ## 실험 2. 개입 메커니즘 sanity — gradient 경로·no-op 안전성·표현력
