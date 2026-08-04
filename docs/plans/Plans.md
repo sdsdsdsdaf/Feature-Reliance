@@ -44,9 +44,9 @@ subagent 대량 spawn 대신 5관점 분리 평가(세션에서 대부분 합의
 | M3 AdaContrast 손실 스택 | `[lane:gate][tdd:required]` memory bank(클래스 균형 큐) · k-NN soft-voting pseudo-label · contrastive(same-pseudo negative 제외) · diversity(옵션 플래그). **거리는 backbone feature `h'`에서**. `buffer`·`pass`를 config 축으로 | 원본 레시피 재현 + `buffer∈{0,256,2048,full}`·`pass∈{1,2,5}`가 코드 변경 없이 전환 | M2 | cc:완료 [f7235a8 — Model/adacontrast.py, 29 tests. `-inf` 전체마스킹 행·`capacity=0` in-batch 경로 검증] |
 | M4 weak/strong augmentation | `[lane:fast][tdd:required]` AdaContrast 원본 aug 정책(기존 `Utils/transfrom.py`는 perturbation용이라 신규 작성) | weak/strong 배치가 동일 샘플에서 생성·shape 검증 | - | cc:완료 [9faf73a+713c37e — Utils/tta_transforms.py, 7 tests, 정규화 상수는 백본 인자로 해결] |
 | M5 anchor 정규화 항 | `[lane:fast][tdd:required]` `{off, 균일 λ‖g−1‖², c_k 가중 λΣc_k(g_k−1)²}` 스위치 | 3 모드 전환 + `λ=0`이 off와 수치 동일 | M2, M6 | cc:TODO |
-| M6 `c_k` 진단 모듈 | `[lane:gate][tdd:required]` offline·source 라벨. `c_k = acc(source) − acc(source \| latent k off)` | `c_k` 벡터 산출·저장 + latent off 경로가 재구성 기여만 제거하는지 검증 | M1, **M2** | cc:TODO |
+| M6 `c_k` 진단 모듈 | `[lane:gate][tdd:required]` offline·source 라벨. `c_k = acc(source) − acc(source \| latent k off)` | `c_k` 벡터 산출·저장 + latent off 경로가 재구성 기여만 제거하는지 검증 | M1, **M2** | cc:완료 [b1c3d1e — Model/diagnostics.py, 13 tests. 캐시된 tail 재실행 + delta 선형성 probe. ⚠️ c_k는 1e-3 자릿수라 n_images가 곧 분해능] |
 | M7 FVU gate | `[lane:gate][tdd:required]` VS2식 런타임 게이트. **⛔ T1.1이 전제를 반증했다 — 구현하지 않는다** | (해당 없음 — 게이트가 발동할 수 없음이 실측으로 확정) | M1, M2, T1.1 | **Optional 강등 [T1.1 8c56764]** — 75셀 전부 임계 미달, severity 단조증가 0/15. 계기를 `L0` 수십 급으로 올린 뒤 재측정할 때만 부활 |
-| M8 online TTA runner | `[lane:gate][tdd:required]` 스트림 배치별 1-step 적응, 평가 프로토콜 2종(online 누적 / adapt-then-eval) 병기 | 1 corruption smoke에서 no-adapt 대비 acc 개선 로그 + 두 프로토콜 수치 동시 출력 | M2, M3, M4 | cc:TODO |
+| M8 online TTA runner | `[lane:gate][tdd:required]` 스트림 배치별 1-step 적응, 평가 프로토콜 2종(online 누적 / adapt-then-eval) 병기 | 1 corruption smoke에서 no-adapt 대비 acc 개선 로그 + 두 프로토콜 수치 동시 출력 | M2, M3, M4 | cc:완료 [08705aa — Model/tta_runner.py, 23 tests. gaussian_noise/5 smoke: final_acc 0.6700(no-adapt) -> 0.6967(적응)] |
 
 → 구현 계약: **[contracts/phaseM.md](contracts/phaseM.md)** (class/function 시그니처·동작·불변식·엣지 케이스)
 
