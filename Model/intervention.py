@@ -50,9 +50,14 @@ class GainIntervention(nn.Module):
         """optimizer에 넘길 파라미터. 항상 [self.gain] 하나뿐이어야 한다(전역 불변식)."""
         return [self.gain]
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """이미지 배치를 받아 (logits, h') 반환.
+    def forward(
+        self, x: torch.Tensor, return_code: bool = False
+    ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """이미지 배치를 받아 (logits, h') 반환. return_code=True면 (logits, h', code) 3-튜플.
         h'는 대조학습에서 거리를 재는 backbone feature(분류기 직전 표현)다.
+        code는 basis.encode가 만든 패치 토큰 단위 상수 코드([B*T_patch, basis.gain_dim]) —
+        M8이 distance_space="z"에서 memory bank용 벡터를 뽑을 때만 필요하다(M2 자체는 안 씀).
+        기본값 False는 기존 호출부(M6·T1.1·기존 테스트)와 완전히 동일하게 2-튜플을 준다.
         timm 내부 API를 직접 호출해 상류(blocks[:hook_block+1])를 no_grad로 묶는다.
         훅+detach 방식은 forward 시 상류 그래프를 그대로 쌓아 메모리를 낭비하므로 쓰지 않는다."""
         backbone = self.backbone
@@ -81,6 +86,8 @@ class GainIntervention(nn.Module):
 
         feat = backbone.forward_head(h_plus, pre_logits=True)  # 대조학습 거리를 재는 h'
         logits = backbone.head(feat)
+        if return_code:
+            return logits, feat, code
         return logits, feat
 
     def reset(self) -> None:
