@@ -6,6 +6,8 @@ CPU에서만 도는 순수 텐서 연산이라 backbone/timm 의존이 없다. G
 (다른 테스트 모듈에서 device 버그가 세 번 잡혔다는 계약 README의 경고를 따른다).
 """
 
+import warnings
+
 import pytest
 import torch
 
@@ -157,3 +159,22 @@ class TestCuda:
         anchor_zero = GainAnchor(mode="l2", lam=0.0).cuda()
         anchor_off = GainAnchor(mode="off", lam=0.0).cuda()
         assert torch.equal(anchor_zero(gain), anchor_off(gain))
+
+
+def test_ck_mode_warns_when_no_positive_ck():
+    """양수 c_k가 하나도 없으면 anchor가 항상 0을 반환해 off와 구별되지 않는다.
+    4B의 anchor 축이 '차이 없음'으로 나올 때 원인을 설계가 아니라 c_k 입력에서
+    찾을 수 있어야 하므로, 조용히 넘어가지 않고 경고해야 한다."""
+    c_k = torch.tensor([-0.1, 0.0, -0.02, 0.0])
+    with pytest.warns(RuntimeWarning, match="양수 c_k가 하나도 없다"):
+        anchor = GainAnchor(mode="ck", lam=1.0, c_k=c_k)
+    gain = torch.tensor([2.0, 3.0, 0.5, -1.0])
+    assert torch.equal(anchor(gain), torch.zeros(()))
+
+
+def test_ck_mode_does_not_warn_when_some_ck_positive():
+    """정상 입력(양수가 하나라도 있음)에서는 경고하지 않는다."""
+    c_k = torch.tensor([-0.1, 1e-3, 0.0, 2e-3])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        GainAnchor(mode="ck", lam=1.0, c_k=c_k)

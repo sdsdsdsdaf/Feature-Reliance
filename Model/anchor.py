@@ -44,6 +44,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import torch
 from torch import Tensor, nn
 
@@ -75,7 +77,20 @@ class GainAnchor(nn.Module):
             if positive_mask.any():
                 weight = clamped / clamped[positive_mask].mean()
             else:
-                weight = clamped  # 전부 0 — 퇴화 케이스, docstring 참고
+                # 퇴화: 보존할 만한 latent가 하나도 없다. 벌점이 항상 0이 되어
+                # 이 모드가 mode="off"와 구별되지 않는다 — 실험 4B의 anchor 축이
+                # "차이 없음"으로 나오는데 원인은 설계가 아니라 c_k 입력이다.
+                # 조용히 넘어가면 그 진단이 불가능하므로 반드시 알린다.
+                warnings.warn(
+                    f'mode="ck"인데 양수 c_k가 하나도 없다(전체 {c_k.numel()}개). '
+                    "anchor가 항상 0을 반환해 사실상 off와 같아진다. "
+                    "c_k를 충분한 n_images로 측정했는지 확인할 것 "
+                    "(c_k의 분해능은 1/n_images이고 실측값은 1e-3 자릿수다 — "
+                    "docs/plans/contracts/phaseM.md M6 참조).",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                weight = clamped  # 전부 0
             self.register_buffer("_ck_weight", weight)
         else:
             self.register_buffer("_ck_weight", torch.empty(0))
