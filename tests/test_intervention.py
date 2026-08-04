@@ -5,6 +5,7 @@ gradient sparsity · reset · residual on/off 전환 · 3 basis 교체.
 worker가 점유 중이라는 전제(phaseM.md 실행 환경 절)를 지킨다.
 """
 
+import os
 import pytest
 import torch
 import timm
@@ -14,6 +15,8 @@ from Model.sae_runtime import FrozenSAE
 from Model.gain_basis import ChannelGainBasis, LatentGainBasis, RandomDictGainBasis
 from Model.intervention import GainIntervention
 
+
+CHECKPOINT_PATH = "outputs/reservoir_sae/vit_b_sae.pt"
 EMBED_DIM = 192
 HOOK_BLOCK = 10  # vit_tiny도 depth=12라 production과 동일하게 blocks[11]만 downstream
 
@@ -277,3 +280,36 @@ class TestCudaDevice:
         (logits.sum() + feat.sum()).backward()
         assert intervention.gain.grad is not None
         assert intervention.gain.grad.device.type == "cuda"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA 미가용")
+@pytest.mark.skipif(not os.path.exists(CHECKPOINT_PATH), reason="실 checkpoint 없음")
+def test_random_dict_basis_follows_sae_device():
+    """RandomDictGainBasis.R이 SAE와 같은 device에 놓이는지 확인한다.
+
+    basis는 nn.Module이 아니라 GainIntervention.to(device)가 닿지 않는다. R을 CPU에
+    둔 채 CUDA 활성을 넣으면 encode()의 행렬곱에서 device 불일치로 터진다 —
+    toy SAE를 CPU에서만 돌리는 테스트로는 안 잡히던 경로다."""
+    sae = FrozenSAE.from_checkpoint(CHECKPOINT_PATH, device="cuda")
+    basis = RandomDictGainBasis(sae, target_l0=64, seed=0)
+    assert basis.R.device.type == "cuda"
+
+    flat = torch.randn(32, sae.input_dim, device="cuda")
+    code = basis.encode(flat)
+    assert code.device.type == "cuda"
+    gain = torch.ones(basis.gain_dim, device="cuda")
+    assert torch.equal(basis.delta(code, gain), torch.zeros_like(flat))
+
+
+@pytest.mark.skipif(not os.path.exists(CHECKPOINT_PATH), reason="실 checkpoint 없음")
+def test_random_dict_R_is_seed_reproducible_across_devices():
+    """같은 seed면 device와 무관하게 같은 R이 나와야 한다.
+    CPU generator로 뽑은 뒤 옮기는 구현이라 이 성질이 유지된다."""
+    cpu_sae = FrozenSAE.from_checkpoint(CHECKPOINT_PATH, device="cpu")
+    a = RandomDictGainBasis(cpu_sae, target_l0=64, seed=7).R
+    b = RandomDictGainBasis(cpu_sae, target_l0=64, seed=7).R
+    assert torch.equal(a, b)
+    if torch.cuda.is_available():
+        cuda_sae = FrozenSAE.from_checkpoint(CHECKPOINT_PATH, device="cuda")
+        c = RandomDictGainBasis(cuda_sae, target_l0=64, seed=7).R
+        assert torch.equal(a, c.cpu())

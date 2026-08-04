@@ -127,9 +127,13 @@ class RandomDictGainBasis:
         self.gain_dim = sae.hidden_dim
         self.supports_absolute = True
 
+        # CPU generator로 뽑아야 device·GPU 종류와 무관하게 같은 seed가 같은 R을 준다.
+        # 만든 뒤 SAE가 있는 device로 옮긴다 — basis는 nn.Module이 아니라서
+        # GainIntervention.to(device)가 여기까지 닿지 않기 때문이다.
         generator = torch.Generator().manual_seed(seed)
         r = torch.randn(sae.hidden_dim, sae.input_dim, generator=generator)
-        self.R = r / r.norm(dim=1, keepdim=True)  # W_dec와 동일하게 행 unit-norm
+        r = r / r.norm(dim=1, keepdim=True)  # W_dec와 동일하게 행 unit-norm
+        self.R = r.to(sae.token_std.device)
 
     def _topk_sparsify(self, c: Tensor) -> Tensor:
         """행마다 target_l0개만 남기고 나머지는 0으로 만들어 SAE 실측 L0에 sparsity를 맞춘다."""
