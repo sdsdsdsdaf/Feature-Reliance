@@ -133,8 +133,10 @@ class FrozenSAE(nn.Module):
         x = self.normalize(h)
         xh = self.decode(self.encode(x, normalized=True))
         mse = ((x - xh) ** 2).mean()
-        var = x.var(unbiased=False)
-        return (mse / max(var, torch.tensor(1e-12))).item()
+        # clamp_min으로 하한을 건다. 파이썬 max()에 CPU 리터럴 텐서를 섞으면
+        # h가 CUDA일 때 device 불일치로 터진다.
+        var = x.var(unbiased=False).clamp_min(1e-12)
+        return (mse / var).item()
 
     def l0(self, z: torch.Tensor, threshold: float | None = None) -> float:
         """토큰 하나당 평균 몇 개의 개념이 켜졌나. 희소성 지표.

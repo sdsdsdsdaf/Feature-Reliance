@@ -29,25 +29,18 @@ contracts/*.md       구현 계약 — 무엇을 만드는가 (시그니처/절�
 | 항목 | 상태 |
 |---|---|
 | Python | 3.11.14 |
-| torch | 2.7.0+cu126 — **`torch.cuda.is_available() == False`** |
+| torch | 2.7.0+cu126 (CUDA runtime 12.6) |
 | timm | 1.0.26 |
-| pytest | 9.0.2 ✅ / ruff · black **미설치**(설치는 가능) |
+| GPU | **RTX 4070 (sm_89), VRAM 11.6GB** · driver 595.84 · `torch.cuda.is_available() == True` ✅ |
+| pytest | 9.0.2 ✅ / ruff 0.16.1 ✅ / black 미도입(T0.2 결정) |
 | PyPI egress | ✅ 도달 |
 
-> ### ⚠️ GPU를 현재 못 쓴다
->
-> RTX 4070이 **하드웨어로는 존재**하지만(`lspci` 확인) **커널 모듈이 없다** — `/dev/nvidia*` 없음, `/proc/driver/nvidia/version` 없음, `lsmod`에 nvidia 없음, `nvidia-smi` 실패. `nvidia-driver-595-open`은 설치돼 있으나 실행 커널 `7.0.0-28-generic`용 모듈이 빌드돼 있지 않다(커널 업그레이드 후 DKMS 미재빌드로 보인다).
->
-> **영향 범위**
-> - **T0.1 · T0.2 · M1**: CPU로 완주 가능. M1의 재구성 검증은 소규모(수백 장) smoke이므로 느릴 뿐 막히지 않는다.
-> - **T1.1 이후 전부**: 불가. T1.1만 해도 38k 이미지 forward이고, Phase 2는 온라인 적응 학습이다.
->
-> **복구** (sudo 필요, 이 계약 범위 밖):
-> ```bash
-> sudo apt install --reinstall nvidia-dkms-595-open   # 또는 dkms autoinstall
-> sudo modprobe nvidia && nvidia-smi
-> ```
-> 실험 task를 dispatch하기 전에 `torch.cuda.is_available()`가 `True`인지 반드시 확인한다.
+**VRAM 11.6GB가 실질 제약이다.** ViT-B/16 + SAE(K=12288) + AdaContrast memory bank가 한 프로세스에 올라가므로, batch size와 memory bank 크기를 정할 때 이 상한을 전제로 잡는다. 실측 여유는 ~10.4GB(데스크톱 환경이 1GB 점유).
+
+> **한때 GPU가 안 붙었던 이력**(2026-08-05): 커널 `7.0.0-28-generic` 부팅 직후 nvidia 모듈이 로드되지 않아 `nvidia-smi`가 실패하고 `torch.cuda.is_available()`가 `False`였다. 모듈 자체는 `/lib/modules/7.0.0-28-generic/kernel/nvidia-595-open/`에 정상 빌드돼 있었고 `modprobe`로 해결됐다(재빌드·커널 변경 불필요).
+> 재발하면 `lsmod | grep nvidia`부터 본다 — 모듈 파일 유무(`modinfo -k $(uname -r) nvidia`)와 로드 여부는 별개다. **DKMS 경로(`updates/dkms/`)에만 없다고 모듈이 없다고 단정하지 말 것** — 패키지 설치본은 `kernel/nvidia-*/`에 들어간다.
+
+**실험 task를 dispatch하기 전에 `torch.cuda.is_available()`가 `True`인지 확인한다.**
 
 ## 공통 규약
 

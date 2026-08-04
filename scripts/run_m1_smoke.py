@@ -19,7 +19,7 @@ CHECKPOINT_PATH = "outputs/reservoir_sae/vit_b_sae.pt"
 TASK_ID = "M1"
 SEED = 0
 NUM_IMAGES = 200
-DEVICE = "cpu"
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def git_commit_hash() -> str:
@@ -58,6 +58,10 @@ def main():
         cache_dtype=torch.float32,
     )
 
+    # collect_tokens_with_hook은 대용량 덤프를 대비해 CPU에 캐시한다.
+    # FrozenSAE의 buffer는 DEVICE에 있으므로 여기서 맞춰준다.
+    tokens = tokens.to(DEVICE)
+
     fvu = frozen.fvu(tokens)
     x = frozen.normalize(tokens)
     z = frozen.encode(x, normalized=True)
@@ -94,6 +98,10 @@ def main():
             "checkpoint": CHECKPOINT_PATH,
             "num_images": NUM_IMAGES,
             "dataset": "imagenette2/val",
+            # 어느 장치에서 잰 수치인지 남긴다 — T1.1이 이 값을 기준선으로 쓴다.
+            "device": DEVICE,
+            "gpu_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+            "torch_version": torch.__version__,
             "model_name": frozen.meta["model_name"],
             "target_block": frozen.meta["target_block"],
             "token_scope": frozen.meta["token_scope"],

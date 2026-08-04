@@ -1,5 +1,6 @@
 """M1 계약 검증: FrozenSAE 정규화 왕복 · decode_delta · frozen grad · FVU/L0 정의 일치."""
 
+import math
 import json
 import os
 
@@ -179,3 +180,37 @@ class TestFromCheckpoint:
         frozen = FrozenSAE.from_checkpoint(CHECKPOINT_PATH, device="cpu")
         trainable = [n for n, p in frozen.named_parameters() if p.requires_grad]
         assert trainable == []
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA 미가용")
+class TestCudaDevice:
+    """CUDA에서만 드러나는 device 불일치를 잡는다.
+
+    M1은 CPU에서 개발·검증됐지만 실제 실험(T1.1 이후)은 전부 GPU에서 돈다.
+    CPU 테스트만으로는 '함수 안에서 CPU 리터럴 텐서를 만들어 쓰는' 류의 버그가
+    보이지 않으므로(실제로 fvu()에 있었다) 전 공개 API를 CUDA에서 한 번씩 태운다."""
+
+    def test_all_public_apis_run_on_cuda(self):
+        """CUDA 입력에 대해 encode/decode/decode_delta/decode_raw/reconstruct/fvu/l0가
+        device 오류 없이 돌고, 결과가 전부 같은 device에 남는지 확인한다."""
+        frozen = FrozenSAE.from_checkpoint(CHECKPOINT_PATH, device="cuda")
+        h = torch.randn(64, frozen.input_dim, device="cuda")
+
+        z = frozen.encode(h)
+        assert z.device.type == "cuda"
+        assert frozen.decode(z).device.type == "cuda"
+        assert frozen.decode_delta(torch.zeros_like(z)).device.type == "cuda"
+        assert frozen.decode_raw(z).device.type == "cuda"
+        assert frozen.reconstruct(h).device.type == "cuda"
+
+        # 스칼라로 떨어지는 두 지표는 값이 유한하기만 하면 된다.
+        assert math.isfinite(frozen.fvu(h))
+        assert math.isfinite(frozen.l0(z))
+
+    def test_cpu_and_cuda_agree(self):
+        """같은 입력에 대해 CPU와 CUDA의 FVU가 일치해야 한다.
+        어긋나면 device별로 다른 경로를 타고 있다는 뜻이다."""
+        h = torch.randn(256, 768)
+        cpu_fvu = FrozenSAE.from_checkpoint(CHECKPOINT_PATH, device="cpu").fvu(h)
+        cuda_fvu = FrozenSAE.from_checkpoint(CHECKPOINT_PATH, device="cuda").fvu(h.cuda())
+        assert cpu_fvu == pytest.approx(cuda_fvu, rel=1e-4)
