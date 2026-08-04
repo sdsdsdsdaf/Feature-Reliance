@@ -350,7 +350,7 @@ def __init__(self, dim: int, capacity: int, num_classes: int):
 def enqueue(self, feats: Tensor, probs: Tensor) -> None:
     """이번 배치를 큐에 밀어 넣는다. 가장 오래된 항목이 밀려난다. capacity=0이면 no-op."""
 
-def knn_soft_vote(self, query: Tensor, k: int = 10) -> Tensor:
+def knn_soft_vote(self, query: Tensor, k: int = 10, logits_weak: Tensor | None = None) -> Tensor:
     """큐에서 가장 닮은 이웃 k개를 찾아 그들의 예측을 평균낸다 -> pseudo-label [N,C].
     '내 예측'이 아니라 '나와 닮은 것들의 합의'라 자기강화가 덜하다."""
 
@@ -364,6 +364,7 @@ def labels(self) -> Tensor:
 - 저장 전 `feats`를 **L2 정규화**한다(코사인 kNN이므로). `probs`는 soft 그대로.
 - **클래스 균형**: 클래스당 `capacity // num_classes` 크기의 링 버퍼를 두고 `probs.argmax(1)` 기준으로 배분. 전역 FIFO 하나면 흔한 클래스가 큐를 독점한다.
 - `capacity == 0` → in-batch 모드. 저장하지 않고 `knn_soft_vote`가 **자기예측으로 폴백**한다(실험 6의 `buffer=0` 경로).
+  폴백하려면 호출자의 weak 예측이 필요하므로 `logits_weak`를 인자로 받는다 — 초안 시그니처엔 없었고, 없으면 이 폴백을 구현할 방법이 없다. `size == 0`인 스트림 초반에도 같은 경로를 탄다.
 
 ```
 knn_soft_vote(query, k):
@@ -587,9 +588,27 @@ class OnlineTTARunner:
        losses = loss_fn(h_w, logits_w, h_s, logits_s, bank)
        L = losses["total"] + anchor(intervention.gain)
        opt.zero_grad(); (scale * L).backward(); opt.step()
-5. bank.enqueue(h_w.detach(), softmax(logits_w, 1).detach())
+5. bank.enqueue(key_w.detach(), softmax(logits_w, 1).detach())   # key_w는 아래 표 참조
 6. 기록: acc_vs_time, ‖gain-1‖, 항별 손실, gate 발동 여부
 ```
+
+### ⚠️ `distance_space`는 memory bank까지 따라가야 한다 (M3 구현 중 발견)
+
+`AdaContrastLoss`는 negative를 `bank.feats`에서 가져오고 query와 내적한다. **query가 사는 공간과 bank가 저장한 공간이 다르면 차원부터 안 맞는다.** 위 초안처럼 `distance_space`와 무관하게 `h_w`를 넣으면 `"z"`·`"logit"` 조건이 **아예 실행되지 않고**, 그러면 실험 4B의 거리공간 축이 통째로 사라진다.
+
+`bank`의 `dim`과 `enqueue`에 넣는 텐서를 **둘 다** `config.distance_space`에 맞춘다:
+
+| `distance_space` | `MemoryBank(dim=...)` | `key_w` (enqueue 대상) |
+|---|---|---|
+| `"h"` (기본) | `feature_dim` (h' 차원) | `h_w` |
+| `"z"` | `basis.gain_dim` (= K) | **패치 토큰 코드를 이미지 단위로 mean-pool한 `[B, K]`** |
+| `"logit"` | `num_classes` | `logits_w` |
+
+**`"z"`의 pooling은 계약에 없던 결정이다.** 코드 `z`는 패치 토큰 단위 `[B*196, K]`인데 bank는 이미지 단위로 저장한다. **패치 축 mean-pool**을 쓴다 — 이미지를 "어떤 개념이 얼마나 켜졌나"의 가방으로 보는 것이고, `s_k`(발화율)를 재는 방식과 같은 관점이다. `max`-pool은 robustness 확인용으로만 둔다.
+
+**`GainIntervention.forward`는 코드를 반환하지 않는다.** `"z"`를 쓰려면 접근 경로가 필요하므로 **`forward(x, return_code: bool = False)`** 로 확장한다 — 기본값이 `False`라 기존 호출부(M6·T1.1·테스트)는 그대로 동작하고, `True`일 때만 `(logits, feat, code)` 3-튜플을 준다. 이 확장은 M8 담당이다.
+
+`"h"` 외의 조건에서 bank 차원과 enqueue 텐서가 어긋나면 **런타임 shape 오류로 죽는다**(조용히 틀리지는 않는다). 그래도 4B 격자를 돌리다 중간에 죽는 건 비용이므로, `OnlineTTARunner.__init__`에서 세 값의 정합을 미리 확인하고 어긋나면 즉시 `ValueError`를 던진다.
 
 `passes > 1`이면 위 루프를 스트림 전체에 대해 `passes`회 반복하고, 종료 후 **adapt-then-eval**로 재평가한다.
 
