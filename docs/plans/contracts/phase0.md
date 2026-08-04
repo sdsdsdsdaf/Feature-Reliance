@@ -71,13 +71,32 @@ data/waterbirds/waterbird_complete95_forest2water2/
 
 **T1.3이 요구하는 것**: 실험 3은 `y`와 `place`를 **각각** 층화 변수로 쓴다. `group = 2*y + place`에서 `y = group // 2`, `place = group % 2`로 복원되므로 `(image, target, group)` 계약으로 충분하지만, **loader가 `split` 필터를 지원해야 한다** — ①정답 측정은 `split=2`(test, 그룹 상대적으로 균형), `c_k^train`은 `split=0`(train, 95% 편향)에서 잰다. `build_dataset("waterbirds", split="train"|"val"|"test")`로 노출한다.
 
-#### `imagenet-c` — 보유
+#### `imagenet-c` — 보유 (2026-08-05 오염 제거 완료)
 
 ```
-data/imagenet-c/<corruption>/<severity>/<wnid>/*.JPEG
+data/imagenet-c/<corruption>/<severity>/<wnid>/ILSVRC2012_val_########.JPEG
 ```
 `corruption` 15 test + 4 extra(`gaussian_blur`·`saturate`·`spatter`·`speckle_noise`), `severity ∈ 1..5`.
 **HP 튜닝은 4 extra에서만, 보고는 15 test에서** — spec의 ImageNet-C 규약. loader가 `split="hp"` / `"report"`로 이 구분을 강제한다.
+
+**정상 규격**: 95셀(19×5) 각각 1000 클래스 × 50장 = **50,000장**, 전부 224×224. 총 4,750,000장.
+
+> ### 이 사본에 있었던 오염 (제거됨 — 재발 시 판별용으로 기록)
+>
+> 2025-07-01 추출분에 **64×64 `test_####.JPEG` 파일 750,000개**가 섞여 있었다. 정상 파일과 같은 클래스 폴더 안에 들어 있어 `ImageFolder`가 그대로 읽었고, `imagenet-c` 샘플 수가 60,000으로 나오는 것이 유일한 겉 증상이었다.
+>
+> | | |
+> |---|---|
+> | 분포 | 1000 클래스 중 **200개만** 100장(=val 50 + test 50), 나머지 800개는 정상 50장 |
+> | 범위 | **report용 15 corruption × 5 severity = 75셀 전부.** HP holdout 4종(20셀)은 무사 |
+> | 일관성 | 200개 클래스 집합이 75셀 전부에서 **동일** → 단일 원인(한 번의 잘못된 추출) |
+> | 정상분 | `ILSVRC2012_val_*` 4,750,000장은 **완전**했다 — 재다운로드 불필요했음 |
+>
+> 제거 후 95셀 전부가 50장×1000클래스로 정확히 맞는 것을 재감사로 확인했다.
+> 감사 도구: [scripts/audit_imagenet_c.py](../../../scripts/audit_imagenet_c.py) — `--out`으로 스캔, `--compare BEFORE AFTER`로 증감 비교.
+> 기록: `outputs/experiments/T0.1/imagenet_c_audit_{before,after}.json`, `data/imagenet-c/metadata.json`의 `post_download_cleanup`.
+>
+> **ImageNet-C를 다시 받거나 다른 사본을 쓸 때는 착수 전에 이 감사를 한 번 돌린다.** 셀당 50,000이 아니면 멈춘다.
 
 #### `colored-mnist` — 보유 (생성 완료, 실측 검증됨)
 
