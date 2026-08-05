@@ -100,36 +100,75 @@ def git_commit_hash() -> str:
 
 
 @torch.no_grad()
-def _collect_tokens_and_orig_acc(model, loader, device: str, target_block: int):
-    """block10 patch 토큰 전량(CPU float32)과 원본(무개입) forward 정확도를 한 pass에 같이 잰다.
+def _stream_cell_stats(frozen: FrozenSAE, model, loader, device: str, target_block: int, want_per_image_fvu: bool):
+    """토큰을 **모아두지 않고** 한 pass에 흘려보내며 FVU/L0/cosine과 원본 정확도를 동시에 누적한다.
 
-    반환: (tokens [N_tokens,768] cpu float32, correct_orig:int, n_images:int).
-    hook은 아무것도 바꾸지 않고 출력을 읽기만 한다(=collect_tokens_with_hook과 동일 계약이되,
-    같은 pass에서 로짓도 같이 뽑아 forward를 한 번 아끼는 버전)."""
-    token_chunks = []
-    captured = {}
+    초안은 셀의 block10 토큰 전량을 CPU에 모은 뒤(`torch.cat`) 청크로 다시 돌았다.
+    셀당 512장이면 308MB지만 이미지 수에 선형이라, in-domain을 ImageNet val 전량
+    (50k장)으로 잡으면 30GB가 되어 호스트 RAM이 터진다. 여기서는 배치 하나를 넘어가는
+    텐서를 두지 않으므로 상주 메모리가 이미지 수와 무관하다.
+
+    FVU 공식은 `FrozenSAE.fvu`와 동일하다(전 원소 pooled mse / pooled var). pooled var는
+    `E[x^2] - E[x]^2`로 누적하는데, x가 정규화 공간이라 평균이 0 근처여서 상쇄 손실이 없다.
+
+    반환: (fvu, l0, cosine, correct_orig, n_images, n_tokens, per_image_fvu|None)."""
+    sse = sum_ = sumsq = 0.0
+    elem = 0
+    l0_total = cos_total = 0.0
+    tok_total = 0
     correct = 0
     n_images = 0
+    per_image_fvu: list[float] | None = [] if want_per_image_fvu else None
+
+    captured = {}
 
     def hook(_module, _inputs, output):
-        captured["tokens"] = output[:, 1:, :].reshape(-1, output.shape[-1]).detach().float().cpu()
+        """block10 출력에서 patch 토큰만 떼어 둔다(CLS 제외). 값은 바꾸지 않는다."""
+        captured["tokens"] = output[:, 1:, :].detach()
 
     handle = model.blocks[target_block].register_forward_hook(hook)
     try:
         for images, labels in loader:
             captured.clear()
             logits = model(images.to(device))
-            token_chunks.append(captured["tokens"])
-            preds = logits.argmax(dim=-1).cpu()
-            correct += int((preds == labels).sum().item())
-            n_images += int(images.shape[0])
+            correct += int((logits.argmax(dim=-1).cpu() == labels).sum().item())
+            b = int(images.shape[0])
+            n_images += b
+
+            tokens = captured["tokens"].float()  # [B, T, D]
+            t_per_img = tokens.shape[1]
+            flat = tokens.reshape(-1, tokens.shape[-1])
+            x = frozen.normalize(flat)
+            z = frozen.encode(x, normalized=True)
+            xh = frozen.decode(z)
+
+            sq = (x - xh) ** 2
+            sse += float(sq.sum().item())
+            sum_ += float(x.sum().item())
+            sumsq += float((x**2).sum().item())
+            elem += x.numel()
+            l0_total += float((z > frozen.active_threshold).sum().item())
+            cos_total += float(F.cosine_similarity(x, xh, dim=1).sum().item())
+            tok_total += x.shape[0]
+
+            if per_image_fvu is not None:
+                # 이미지 단위 FVU도 같은 공식으로, 배치 안에서 바로 계산한다.
+                sq_img = sq.view(b, t_per_img, -1)
+                x_img = x.view(b, t_per_img, -1)
+                mse_img = sq_img.mean(dim=(1, 2))
+                var_img = x_img.var(dim=(1, 2), unbiased=False).clamp_min(1e-12)
+                per_image_fvu.extend((mse_img / var_img).tolist())
+
+            del tokens, flat, x, z, xh, sq, logits
     finally:
         handle.remove()
 
-    if not token_chunks:
+    if tok_total == 0:
         raise RuntimeError("토큰을 하나도 수집하지 못했다 — 데이터셋이 비어있을 수 있다.")
-    tokens = torch.cat(token_chunks, dim=0)
-    return tokens, correct, n_images
+
+    mse = sse / max(1, elem)
+    var = max(sumsq / max(1, elem) - (sum_ / max(1, elem)) ** 2, 1e-12)
+    return mse / var, l0_total / tok_total, cos_total / tok_total, correct, n_images, tok_total, per_image_fvu
 
 
 @torch.no_grad()
@@ -162,46 +201,6 @@ def _recon_accuracy(frozen: FrozenSAE, model, loader, device: str, target_block:
     return correct, n_images
 
 
-@torch.no_grad()
-def _pooled_fvu_l0_cosine(frozen: FrozenSAE, tokens: torch.Tensor, chunk_size: int = 4096) -> tuple[float, float, float]:
-    """FrozenSAE.fvu()/.l0()와 **정확히 같은 공식**(전 원소 pooled mse/var, 토큰당 평균 활성 수)을
-    청크 단위로 누적해 계산한다. 한 셀의 토큰(최대 512장 x 196패치 ~= 100k개)을 SAE 코드(K=12288)로
-    한 번에 encode하면 GPU가 OOM나기 때문에 필요하다 — 공식을 바꾸는 게 아니라
-    `frozen.normalize`/`frozen.encode`/`frozen.decode`(전부 원본 그대로) 호출을 청크로 나눠
-    같은 분자(sse)·분모(pooled var)를 정확히 다시 조립하는 것뿐이다.
-
-    반환: (fvu, l0, cosine). fvu/l0 정의는 Model.sae_runtime.FrozenSAE.fvu/.l0 docstring 참조."""
-    sse_total = 0.0
-    sum_total = 0.0
-    sumsq_total = 0.0
-    elem_total = 0
-    l0_total = 0.0
-    cos_total = 0.0
-    tok_total = 0
-
-    for start in range(0, tokens.shape[0], chunk_size):
-        chunk = tokens[start : start + chunk_size]
-        x = frozen.normalize(chunk)
-        z = frozen.encode(x, normalized=True)
-        xh = frozen.decode(z)
-
-        sse_total += ((x - xh) ** 2).sum().item()
-        sum_total += x.sum().item()
-        sumsq_total += (x**2).sum().item()
-        elem_total += x.numel()
-        l0_total += (z > frozen.active_threshold).sum().item()
-        cos_total += F.cosine_similarity(x, xh, dim=1).sum().item()
-        tok_total += x.shape[0]
-        del x, z, xh
-
-    mse = sse_total / max(1, elem_total)
-    var = max(sumsq_total / max(1, elem_total) - (sum_total / max(1, elem_total)) ** 2, 1e-12)
-    fvu = mse / var
-    l0 = l0_total / max(1, tok_total)
-    cosine = cos_total / max(1, tok_total)
-    return fvu, l0, cosine
-
-
 def measure_cell(
     frozen: FrozenSAE,
     model,
@@ -228,17 +227,9 @@ def measure_cell(
         subset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True
     )
 
-    tokens, correct_orig, n_images = _collect_tokens_and_orig_acc(model, loader, device, frozen.meta["target_block"])
-    tokens = tokens.to(device)
-
-    fvu, l0, cosine = _pooled_fvu_l0_cosine(frozen, tokens)
-
-    per_image_fvu = None
-    if want_per_image_fvu:
-        tokens_per_image = tokens.shape[0] // max(1, n_images)
-        per_image_fvu = [
-            frozen.fvu(tokens[i * tokens_per_image : (i + 1) * tokens_per_image]) for i in range(n_images)
-        ]
+    fvu, l0, cosine, correct_orig, n_images, n_tokens_total, per_image_fvu = _stream_cell_stats(
+        frozen, model, loader, device, frozen.meta["target_block"], want_per_image_fvu
+    )
 
     correct_recon, n_images_recon = _recon_accuracy(frozen, model, loader, device, frozen.meta["target_block"])
     if n_images_recon != n_images:
@@ -248,7 +239,7 @@ def measure_cell(
 
     return {
         "n_images": n_images,
-        "n_tokens": int(tokens.shape[0]),
+        "n_tokens": int(n_tokens_total),
         "fvu": fvu,
         "l0": l0,
         "cosine": cosine,
