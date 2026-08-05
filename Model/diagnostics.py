@@ -137,6 +137,7 @@ def compute_c_k(
     candidates: Tensor | None = None,
     latent_chunk: int = 64,
     max_images: int | None = None,
+    cache_device: str | torch.device | None = None,
 ) -> Tensor:
     """latent별 causal 기여도 `c_k = acc(gain≡1) − acc(gain_k=0)`을 측정한다.
 
@@ -166,7 +167,14 @@ def compute_c_k(
             return c_k.cpu()
 
         # 캐시 패스: h(block10 출력)와 code를 이미지마다 한 번만 계산해 저장.
-        # code는 후보 열만 남겨 메모리를 아낀다(K 전체를 들고 있지 않는다).
+        # code는 후보 열만 남긴다(K 전체를 들고 있지 않는다).
+        #
+        # 캐시는 기본적으로 **CPU**에 둔다. 실측 규모에서 VRAM에 두면 들어가지 않는다:
+        #   Waterbirds train 4,795장 x 196토큰 = 939,820 토큰
+        #   x alive latent 5,810개 x 4B = 21.8GB  (11.6GB 카드에 불가)
+        # 뒤 루프의 지배적 비용은 tail forward라 배치별 H2D 전송은 묻힌다.
+        # cache_device="cuda"로 명시하면 예전처럼 GPU에 둔다(작은 실험용).
+        cache_dev = torch.device("cpu") if cache_device is None else torch.device(cache_device)
         cached = []
         baseline_correct = 0
         total_images = 0
@@ -177,11 +185,11 @@ def compute_c_k(
             total_images += x.shape[0]
             cached.append(
                 {
-                    "prefix": prefix,
+                    "prefix": prefix.to(cache_dev, non_blocking=True),
                     "patch_shape": patch_shape,
-                    "flat": flat,
-                    "code_cand": code[:, candidates],
-                    "y": y,
+                    "flat": flat.to(cache_dev, non_blocking=True),
+                    "code_cand": code[:, candidates].to(cache_dev, non_blocking=True),
+                    "y": y.to(cache_dev, non_blocking=True),
                 }
             )
 
@@ -204,11 +212,16 @@ def compute_c_k(
 
             ablated_correct = torch.zeros(c, device=device)
             for item in cached:
-                code_col = item["code_cand"][:, start : start + c]  # [N_tok, c]
+                code_col = item["code_cand"][:, start : start + c].to(device, non_blocking=True)  # [N_tok, c]
+                flat_i = item["flat"].to(device, non_blocking=True)
                 delta = code_col.unsqueeze(-1) * dict_row.unsqueeze(0)  # [N_tok, c, D]
-                patch_plus_expanded = item["flat"].unsqueeze(1) + delta  # [N_tok, c, D]
-                logits = _tail_chunk(intervention, item["prefix"], item["patch_shape"], patch_plus_expanded, c)
-                correct = (logits.argmax(dim=-1) == item["y"].unsqueeze(0)).sum(dim=1)  # [c]
+                patch_plus_expanded = flat_i.unsqueeze(1) + delta  # [N_tok, c, D]
+                logits = _tail_chunk(
+                    intervention, item["prefix"].to(device, non_blocking=True), item["patch_shape"],
+                    patch_plus_expanded, c,
+                )
+                correct = (logits.argmax(dim=-1) == item["y"].to(device).unsqueeze(0)).sum(dim=1)  # [c]
+                del code_col, flat_i, delta, patch_plus_expanded, logits
                 ablated_correct += correct.float()
 
             ablated_acc = ablated_correct / total_images
