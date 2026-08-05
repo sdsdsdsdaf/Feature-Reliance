@@ -137,7 +137,6 @@ def compute_c_k(
     candidates: Tensor | None = None,
     latent_chunk: int = 64,
     max_images: int | None = None,
-    cache_device: str | torch.device | None = None,
 ) -> Tensor:
     """latent별 causal 기여도 `c_k = acc(gain≡1) − acc(gain_k=0)`을 측정한다.
 
@@ -145,8 +144,10 @@ def compute_c_k(
         `DEFAULT_FIRING_RATE_FLOOR` 이상인 latent만 자동 선정한다(전체 K 중 상당수는
         한 번도 발화하지 않으므로 전수 평가를 피한다).
     latent_chunk: 한 번의 tail 재실행에 함께 태울 latent 후보 수.
-    max_images: 캐시할 최대 이미지 수. None이면 loader 전체를 쓴다(실전에서는
-        비용 때문에 사실상 필수).
+    max_images: 처리할 최대 이미지 수. None이면 loader 전체를 쓴다.
+        메모리는 이미지 수와 무관하므로(스트리밍) 이건 **시간** 예산이지 메모리
+        예산이 아니다. 다만 c_k의 분해능이 1/n_images라 너무 줄이면 값이 전부
+        0으로 양자화된다(phaseM.md M6 참조).
 
     반환: `[K]` 텐서. 후보에서 제외된 latent는 정확히 `0.0`. 부호가 있을 수 있다
     (제거했더니 오히려 정확도가 오르면 음수) — 클램프하지 않는다.
@@ -166,66 +167,60 @@ def compute_c_k(
         if n_cand == 0:
             return c_k.cpu()
 
-        # 캐시 패스: h(block10 출력)와 code를 이미지마다 한 번만 계산해 저장.
-        # code는 후보 열만 남긴다(K 전체를 들고 있지 않는다).
+        # 스트리밍 패스: 배치 하나를 넘어가는 건 아무것도 들고 있지 않는다.
         #
-        # 캐시는 기본적으로 **CPU**에 둔다. 실측 규모에서 VRAM에 두면 들어가지 않는다:
-        #   Waterbirds train 4,795장 x 196토큰 = 939,820 토큰
-        #   x alive latent 5,810개 x 4B = 21.8GB  (11.6GB 카드에 불가)
-        # 뒤 루프의 지배적 비용은 tail forward라 배치별 H2D 전송은 묻힌다.
-        # cache_device="cuda"로 명시하면 예전처럼 GPU에 둔다(작은 실험용).
-        cache_dev = torch.device("cpu") if cache_device is None else torch.device(cache_device)
-        cached = []
-        baseline_correct = 0
-        total_images = 0
-        for x, y in _iterate_capped(loader, device, max_images):
-            prefix, patch_shape, flat, code = _upstream(intervention, x)
-            logits = _tail(intervention, prefix, patch_shape, flat)
-            baseline_correct += (logits.argmax(dim=1) == y).sum().item()
-            total_images += x.shape[0]
-            cached.append(
-                {
-                    "prefix": prefix.to(cache_dev, non_blocking=True),
-                    "patch_shape": patch_shape,
-                    "flat": flat.to(cache_dev, non_blocking=True),
-                    "code_cand": code[:, candidates].to(cache_dev, non_blocking=True),
-                    "y": y.to(cache_dev, non_blocking=True),
-                }
-            )
-
-        if total_images == 0:
-            return c_k.cpu()
-        baseline_acc = baseline_correct / total_images
-
+        # 초안은 전 이미지의 flat/code를 캐시했는데 실측 규모에서
+        #   Waterbirds train 4,795장 x 196토큰 x alive latent 5,810개 x 4B = 21.8GB
+        # 라 VRAM에 안 들어간다. 그렇다고 CPU로 내리면 호스트 RAM이 같은 크기로
+        # 터질 뿐, 문제가 옮겨갈 뿐이다.
+        #
+        # 대신 루프 순서를 뒤집는다 — **데이터가 바깥, 후보 청크가 안쪽**.
+        # tail forward 횟수는 (배치 수 x 청크 수)로 이전과 완전히 같고 상류도
+        # 배치당 한 번뿐이라 계산량은 그대로인데, 상주 메모리는 배치 하나
+        # 크기로 떨어진다(이미지 수에 대해 O(1)).
+        #
+        # 청크별 dict_row는 데이터와 무관하므로 루프 밖에서 한 번만 뽑는다
+        # ([n_cand, D] 전체가 수십MB라 이건 들고 있어도 된다).
         gain_probe_zero = torch.zeros(gain_dim, device=device)
-        for start in range(0, n_cand, latent_chunk):
+        chunk_starts = list(range(0, n_cand, latent_chunk))
+        dict_rows = []
+        for start in chunk_starts:
             chunk_idx = candidates[start : start + latent_chunk]
             c = chunk_idx.numel()
-
             # probe: 후보별 one-hot code에 basis.delta를 한 번 호출해, 각 latent를
             # gain_k=0으로 껐을 때 h에 더해질 "단위 code당" 보정 벡터를 뽑는다.
             # delta가 code에 대해 선형이라는 사실만으로 성립하며, basis 내부의
             # 딕셔너리 표현(W_dec/R 등)을 직접 읽지 않는다.
             code_probe = torch.zeros(c, gain_dim, device=device)
             code_probe[torch.arange(c, device=device), chunk_idx] = 1.0
-            dict_row = basis.delta(code_probe, gain_probe_zero)  # [c, D] == -Dict[k]*scale
+            dict_rows.append(basis.delta(code_probe, gain_probe_zero))  # [c, D]
+            del code_probe
 
-            ablated_correct = torch.zeros(c, device=device)
-            for item in cached:
-                code_col = item["code_cand"][:, start : start + c].to(device, non_blocking=True)  # [N_tok, c]
-                flat_i = item["flat"].to(device, non_blocking=True)
-                delta = code_col.unsqueeze(-1) * dict_row.unsqueeze(0)  # [N_tok, c, D]
-                patch_plus_expanded = flat_i.unsqueeze(1) + delta  # [N_tok, c, D]
-                logits = _tail_chunk(
-                    intervention, item["prefix"].to(device, non_blocking=True), item["patch_shape"],
-                    patch_plus_expanded, c,
+        ablated_correct = torch.zeros(n_cand, device=device)  # candidates와 같은 순서
+        baseline_correct = 0
+        total_images = 0
+        for x, y in _iterate_capped(loader, device, max_images):
+            prefix, patch_shape, flat, code = _upstream(intervention, x)
+            baseline_logits = _tail(intervention, prefix, patch_shape, flat)
+            baseline_correct += (baseline_logits.argmax(dim=1) == y).sum().item()
+            total_images += x.shape[0]
+            del baseline_logits
+
+            for ci, start in enumerate(chunk_starts):
+                chunk_idx = candidates[start : start + latent_chunk]
+                c = chunk_idx.numel()
+                code_col = code[:, chunk_idx]  # [N_tok, c]
+                delta = code_col.unsqueeze(-1) * dict_rows[ci].unsqueeze(0)  # [N_tok, c, D]
+                logits = _tail_chunk(intervention, prefix, patch_shape, flat.unsqueeze(1) + delta, c)
+                ablated_correct[start : start + c] += (
+                    (logits.argmax(dim=-1) == y.unsqueeze(0)).sum(dim=1).float()
                 )
-                correct = (logits.argmax(dim=-1) == item["y"].to(device).unsqueeze(0)).sum(dim=1)  # [c]
-                del code_col, flat_i, delta, patch_plus_expanded, logits
-                ablated_correct += correct.float()
+                del code_col, delta, logits
+            del prefix, flat, code
 
-            ablated_acc = ablated_correct / total_images
-            c_k[chunk_idx] = baseline_acc - ablated_acc
+        if total_images == 0:
+            return c_k.cpu()
+        c_k[candidates] = baseline_correct / total_images - ablated_correct / total_images
 
         return c_k.cpu()
     finally:
