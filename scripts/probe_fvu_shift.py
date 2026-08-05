@@ -27,6 +27,7 @@ from timm.data import create_transform, resolve_model_data_config
 
 from Model.sae_runtime import FrozenSAE
 from Utils.datasets import build_dataset
+from Utils.progress import pbar
 from Utils.SAE_utils import collect_tokens_with_hook
 
 CHECKPOINT_PATH = "outputs/reservoir_sae/vit_b_sae.pt"
@@ -108,6 +109,8 @@ def main() -> None:
     in_domain = measure(frozen, model, transform, _TransformDataset(ds, transform), args.n, device)
 
     cells = []
+    cells_todo = [(c, s) for c in args.corruptions.split(",") for s in (int(x) for x in args.severities.split(","))]
+    _bar = pbar(total=len(cells_todo), desc="probe cell", unit="cell")
     for corruption in args.corruptions.split(","):
         for severity in (int(s) for s in args.severities.split(",")):
             ds, _ = build_dataset(
@@ -116,6 +119,9 @@ def main() -> None:
             m = measure(frozen, model, transform, _TransformDataset(ds, transform), args.n, device)
             m.update(corruption=corruption, severity=severity, fvu_ratio_vs_in_domain=m["fvu"] / in_domain["fvu"])
             cells.append(m)
+            _bar.update(1)
+
+    _bar.close()
 
     # 게이트가 발동할 수 있는가: in-domain FVU를 넘는 OOD 셀이 하나라도 있는가.
     above = [c for c in cells if c["fvu"] > in_domain["fvu"]]

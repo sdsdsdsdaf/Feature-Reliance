@@ -25,6 +25,7 @@ import torch
 from torch import Tensor
 
 from Model.adacontrast import AdaContrastLoss, MemoryBank
+from Utils.progress import pbar
 from Model.intervention import GainIntervention
 
 _VALID_DISTANCE_SPACES = ("h", "z", "logit")
@@ -211,7 +212,9 @@ class OnlineTTARunner:
         loss_trace: list[Optional[dict]] = []
 
         for _pass_idx in range(self.config.passes):
-            for x_weak, x_strong, y in stream:
+            for x_weak, x_strong, y in pbar(
+                stream, desc=f"TTA adapt (pass {_pass_idx + 1}/{self.config.passes})", unit="batch", leave=False
+            ):
                 x_weak = x_weak.to(device)
                 x_strong = x_strong.to(device)
                 y = y.to(device)
@@ -230,7 +233,7 @@ class OnlineTTARunner:
         final_correct = 0
         final_seen = 0
         with torch.no_grad():
-            for x_weak, _x_strong, y in stream:
+            for x_weak, _x_strong, y in pbar(stream, desc="final eval", unit="batch", leave=False):
                 x_weak = x_weak.to(device)
                 y = y.to(device)
                 logits, _feat = self.intervention(x_weak)

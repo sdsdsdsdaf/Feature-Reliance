@@ -20,6 +20,8 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+from Utils.progress import pbar
+
 VAL_PREFIX = "ILSVRC2012_val_"
 EXTRA_PREFIX = "test_"
 # spec 규약: HP 튜닝 전용 4종, 보고용 15종.
@@ -62,7 +64,7 @@ def audit(root: Path) -> dict:
     for corruption in corruption_dirs:
         with os.scandir(corruption.path) as sevs:
             sev_dirs = sorted((e for e in sevs if e.is_dir()), key=lambda e: e.name)
-        for sev in sev_dirs:
+        for sev in pbar(sev_dirs, desc=f"scan {corruption.name}", unit="sev", leave=False):
             per_class = scan_cell(sev)
             n_val = sum(c["val"] for c in per_class.values())
             n_extra = sum(c["extra"] for c in per_class.values())

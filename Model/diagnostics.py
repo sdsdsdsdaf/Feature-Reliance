@@ -30,6 +30,8 @@ from __future__ import annotations
 import torch
 from torch import Tensor
 
+from Utils.progress import pbar
+
 DEFAULT_FIRING_RATE_FLOOR = 0.005  # 발화율 하한(0.5%) — phaseM.md M6 절 예시값
 
 
@@ -120,7 +122,7 @@ def _latent_firing_rate(intervention, loader, device, max_images) -> Tensor:
     threshold = _firing_threshold(intervention.basis)
     fire_counts = torch.zeros(gain_dim, device=device)
     total_tokens = 0
-    for x, _y in _iterate_capped(loader, device, max_images):
+    for x, _y in pbar(_iterate_capped(loader, device, max_images), desc="발화율 스캔", unit="batch"):
         _, _, _, code = _upstream(intervention, x)
         fire_counts += (code > threshold).float().sum(dim=0)
         total_tokens += code.shape[0]
@@ -199,6 +201,8 @@ def compute_c_k(
         ablated_correct = torch.zeros(n_cand, device=device)  # candidates와 같은 순서
         baseline_correct = 0
         total_images = 0
+        n_batches = (max_images + loader.batch_size - 1) // loader.batch_size if max_images else None
+        bar = pbar(total=n_batches, desc=f"c_k ({n_cand} latent x {len(chunk_starts)} chunk)", unit="batch")
         for x, y in _iterate_capped(loader, device, max_images):
             prefix, patch_shape, flat, code = _upstream(intervention, x)
             baseline_logits = _tail(intervention, prefix, patch_shape, flat)
@@ -217,6 +221,8 @@ def compute_c_k(
                 )
                 del code_col, delta, logits
             del prefix, flat, code
+            bar.update(1)
+        bar.close()
 
         if total_images == 0:
             return c_k.cpu()

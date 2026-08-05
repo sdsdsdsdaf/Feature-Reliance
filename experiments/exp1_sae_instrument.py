@@ -40,6 +40,7 @@ from PIL import Image
 from timm.data import create_transform, resolve_model_data_config
 
 from Model.sae_runtime import FrozenSAE
+from Utils.progress import pbar
 from Utils.datasets import build_dataset
 
 TASK_ID = "T1.1"
@@ -128,7 +129,7 @@ def _stream_cell_stats(frozen: FrozenSAE, model, loader, device: str, target_blo
 
     handle = model.blocks[target_block].register_forward_hook(hook)
     try:
-        for images, labels in loader:
+        for images, labels in pbar(loader, desc="cell", unit="batch", leave=False):
             captured.clear()
             logits = model(images.to(device))
             correct += int((logits.argmax(dim=-1).cpu() == labels).sum().item())
