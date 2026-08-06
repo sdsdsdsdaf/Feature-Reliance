@@ -49,7 +49,10 @@ from Utils.SAE_utils import (
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 OUTPUT_ROOT = "outputs/SAE_validation"
-GRID_DIR_NAME = "grid_search"
+# trial 재사용은 trial_NNNN 디렉터리 이름만 보고 판정한다(override 값은 안 본다). grid를
+# 바꿀 때 이 이름을 그대로 두면 이전 grid의 완료된 trial_0000이 새 override 라벨을 달고
+# 재사용된다 — 조용히 틀린 결과가 나온다. GRID_SPACE를 바꾸면 여기도 반드시 바꾼다.
+GRID_DIR_NAME = "grid_lambda_low"
 
 # Dataset / backbone
 # "imagenet" = HF 캐시(data/hf_cache)의 ImageNet-1k, 1000 클래스. PatchSAE와 같은 학습 분포다.
@@ -131,12 +134,25 @@ GRID_MODE = "min"
 # 초과 개수(mean_l0)로 재면 활성 크기만 작아진 dense SAE가 그대로 통과한다.
 # None으로 두면 제약이 꺼지고 기존 동작(val_nmse 단독 선정)으로 돌아간다.
 SPARSITY_L0_METRIC = "l0_raw"
-SPARSITY_L0_MAX = 150.0
-# l1_reg 3점 스윕. 나머지 축은 상단 노브 값(expansion 64, lr 4e-4, threshold 0.2)으로 고정한다.
-# active_threshold는 학습 손실에 안 들어가고 mean_l0 계산에만 쓰이므로 grid 축으로 두면
-# 같은 학습을 값만 바꿔 두 번 돌리게 된다 — 그래서 뺐다.
+# 150은 PatchSAE 운용점(L0 148.56)이고, lambda 1.2e-3에서 실측 l0_raw 146.5로 딱 걸렸다.
+# lambda를 그 아래로 내리면 l0_raw가 150을 넘어 **모든 trial이 infeasible**이 되고
+# select_best_trial이 selected=None을 반환한다 — grid가 통째로 무의미해진다. 그래서
+# 아래 GRID_SPACE와 함께 올린다. 800은 49,152개 중 1.6%로, 이 제약을 도입하게 만든
+# 원래 실패(l0_raw 4,550 / 12,288 = 37% dense)와는 여전히 한참 멀다.
+SPARSITY_L0_MAX = 800.0
+# lambda 하향 스윕 — 재구성 품질을 올리는 게 목적이다. 개입 진단의 바닥이 너무 높다:
+# alpha=1.0(latent 무개입)에서 재구성만으로 정확도 20.3점이 날아가는데 cue 효과는 4점이라
+# 신호 대 잡음이 나쁘다. 1.2e-3은 앵커로 남겨 이전 실행과 대조한다.
+#
+# 실측 (lambda -> l0_raw / FVU): 1.2e-3 -> 146.5 / 0.138,  2.4e-3 -> 44.9 / 0.189,
+#                                4.8e-3 -> 14.3 / 0.268.  l0_raw는 대략 lambda^-1.68 이다.
+# 외삽 예상: 0.85e-3 -> l0_raw ~260 / FVU ~0.117,  0.6e-3 -> ~470 / ~0.099
+#
+# 셋 다 feasible할 전망이라 선정은 사실상 val_nmse가 하고 가장 낮은 lambda가 뽑힌다.
+# 그건 의도한 것이다 — 이번 grid의 목적은 제약 안에서 고르는 게 아니라 희소성/재구성
+# 트레이드오프 곡선을 세 점으로 재는 것이다. l0_max는 폭주 방지용으로만 남는다.
 GRID_SPACE = {
-    "sae.l1_reg": [1.2e-3, 2.4e-3, 4.8e-3],
+    "sae.l1_reg": [0.6e-3, 0.85e-3, 1.2e-3],
 }
 _UNUSED_GRID_SPACE_FULL = {
     "sae.expansion": [16, 32, 64],
