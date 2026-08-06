@@ -93,7 +93,10 @@ TOKEN_CACHE_MAX_CPU_GIB = 8.0
 #                    이 모드에서는 EPOCHS와 MAX_TRAIN_TOKENS를 안 쓴다.
 TRAIN_SCHEDULE_MODE = "token_budget"  # "epoch", "token_budget"
 TOTAL_TRAIN_TOKENS = 502_217_464
-EVAL_EVERY_STEPS = 200
+# 검증 1회는 실측 11.1초다(val 토큰 80만, hidden 49152). 200스텝마다면 354회 = 66분으로
+# trial 1개(3.5시간)의 31%를 검증에 쓴다. 1000으로 하면 71회 = 13분이다.
+# EARLY_STOPPING_PATIENCE는 "검증 횟수"로 세므로 이 값과 함께 움직여야 한다 — 아래 참조.
+EVAL_EVERY_STEPS = 1000
 EPOCHS = 120
 # PatchSAE 참조 구현 기본값(lr 4e-4 + constant-with-warmup 500 step). 이전 값은 1e-4 / warmup 없음.
 SAE_LR = 4e-4
@@ -119,7 +122,12 @@ SAE_CHECK_FINITE = True
 MATMUL_PRECISION = "high"
 
 # Early stopping
-EARLY_STOPPING_PATIENCE = 30
+# patience는 "개선 없는 검증 횟수"라 EVAL_EVERY_STEPS와 곱해져야 스텝 수가 된다.
+# 30 x 200 = 6,000 스텝이었다. EVAL_EVERY_STEPS를 1000으로 올리면서 그대로 두면
+# 30,000 스텝이 되어 5배 느슨해지고, 이전 실행에서 62% 지점(44,000/70,774 스텝)에
+# 걸렸던 조기 종료가 아예 안 걸린다 — 검증에서 아낀 시간보다 학습이 더 길어진다.
+# 6 x 1000 = 6,000 스텝으로 유효 인내를 그대로 유지한다.
+EARLY_STOPPING_PATIENCE = 6
 EARLY_STOPPING_EPS = 5e-5
 EARLY_STOPPING_VERBOSE = False
 
