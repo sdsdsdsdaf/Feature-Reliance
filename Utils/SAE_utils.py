@@ -344,14 +344,28 @@ def _assert_finite_grads(model):
             raise FloatingPointError(f"Non-finite gradient detected in {name}.")
 
 
-def _run_sae_step(sae, optimizer, xb, scaler, sae_config, optim_config, device, scheduler=None):
+def _run_sae_step(sae, optimizer, xb, scaler, sae_config, optim_config, device, scheduler=None, token_std=None):
+    """SGD 한 스텝. xb는 정규화된 활성이다.
+
+    sae_config.recon_space="raw"이면 재구성 오차를 denorm 공간에서 잰다. denorm을 명시적으로
+    계산할 필요는 없다 — mu가 상쇄되므로
+        (x_hat*sigma + mu) - (x*sigma + mu) = (x_hat - x)*sigma
+    이고, 큰 값끼리 빼면서 정밀도를 잃지도 않는다."""
     amp_dtype = get_torch_dtype(sae_config.amp_dtype)
     amp_enabled = _amp_enabled(device, optim_config.use_amp)
     autocast_device = "cuda" if str(device).startswith("cuda") else "cpu"
+    recon_space = str(getattr(sae_config, "recon_space", "norm")).lower()
+    if recon_space not in ("norm", "raw"):
+        raise ValueError(f"Unknown sae.recon_space: {recon_space!r}. 'norm' 또는 'raw'.")
+    if recon_space == "raw" and token_std is None:
+        raise ValueError("sae.recon_space='raw'는 token_std가 필요하다 (token_stats['std']를 device에 올려 넘길 것).")
 
     with torch.autocast(device_type=autocast_device, dtype=amp_dtype, enabled=amp_enabled):
         x_hat, z = sae(xb)
-        recon_loss = F.mse_loss(x_hat, xb)
+        if recon_space == "raw":
+            recon_loss = ((x_hat - xb) * token_std).pow(2).mean()
+        else:
+            recon_loss = F.mse_loss(x_hat, xb)
         l1_loss = z.abs().sum(dim=-1).mean()
         loss = recon_loss + float(sae_config.l1_reg) * l1_loss
 
@@ -504,7 +518,22 @@ def _make_scheduler(optimizer, optim_config):
     )
 
 
-def _build_eval_row(sae, val_tokens, hidden_dim, eval_index, step, tokens_seen, train_loss_sum, train_mse_sum, train_l1_sum, train_rows, elapsed, config):
+def _raw_space_stats(config, token_stats, device):
+    """recon_space='raw'일 때 학습/검증이 쓸 device 위 통계를 한 번만 만든다.
+
+    반환 (token_std, eval_stats). 'norm'이면 (None, None)이고 그러면 손실도 지표도
+    기존 정규화 공간 동작 그대로다. 스텝마다 .to(device)를 다시 하지 않으려고 학습 함수
+    시작 지점에서 한 번 호출한다."""
+    if str(getattr(config.sae, "recon_space", "norm")).lower() != "raw":
+        return None, None
+    stats = {
+        "mean": token_stats["mean"].to(device).float(),
+        "std": token_stats["std"].to(device).float(),
+    }
+    return stats["std"], stats
+
+
+def _build_eval_row(sae, val_tokens, hidden_dim, eval_index, step, tokens_seen, train_loss_sum, train_mse_sum, train_l1_sum, train_rows, elapsed, config, token_stats=None):
     """스텝 기준 검증 결과 한 줄. epoch 모드의 row와 같은 스키마를 유지한다.
 
     `epoch` 키에는 검증 회차를 넣는다 — EarlyStopper와 plot_sae_training_history가
@@ -513,6 +542,7 @@ def _build_eval_row(sae, val_tokens, hidden_dim, eval_index, step, tokens_seen, 
     row = _build_epoch_row(
         sae, val_tokens, hidden_dim, eval_index,
         train_loss_sum, train_mse_sum, train_l1_sum, train_rows, elapsed, config,
+        token_stats=token_stats,
     )
     row["step"] = int(step)
     row["tokens_seen"] = int(tokens_seen)
@@ -548,6 +578,7 @@ def train_sae_token_budget(
     optimizer = _make_optimizer(sae, config.optim_config)
     scaler = _make_grad_scaler(device, config.optim_config.use_amp, get_torch_dtype(config.sae.amp_dtype))
     scheduler = _make_scheduler(optimizer, config.optim_config)
+    token_std, eval_stats = _raw_space_stats(config, token_stats, device)
     history = []
     early_stopper = EarlyStopper(
         patience=config.early_stopping.patience,
@@ -583,7 +614,7 @@ def train_sae_token_budget(
                 for start in range(0, full_count, config.sae.batch_size):
                     xb = token_batch[start : start + config.sae.batch_size].float().to(device)
                     loss, recon_loss, l1_loss, x_hat, z = _run_sae_step(
-                        sae, optimizer, xb, scaler, config.sae, config.optim_config, device, scheduler
+                        sae, optimizer, xb, scaler, config.sae, config.optim_config, device, scheduler, token_std
                     )
                     train_loss_sum += float(loss.item()) * xb.shape[0]
                     train_mse_sum += float(recon_loss.item()) * xb.shape[0]
@@ -599,7 +630,7 @@ def train_sae_token_budget(
                         row = _build_eval_row(
                             sae, val_tokens, hidden_dim, eval_index, n_steps, n_tokens,
                             train_loss_sum, train_mse_sum, train_l1_sum, train_rows,
-                            time.perf_counter() - window_start, config,
+                            time.perf_counter() - window_start, config, eval_stats,
                         )
                         _, should_stop = early_stopper.step(row["normalized_mse"], sae, row)
                         history.append(row)
@@ -656,6 +687,7 @@ def train_sae_streaming(
     optimizer = _make_optimizer(sae, config.optim_config)
     scaler = _make_grad_scaler(device, config.optim_config.use_amp, get_torch_dtype(config.sae.amp_dtype))
     scheduler = _make_scheduler(optimizer, config.optim_config)
+    token_std, eval_stats = _raw_space_stats(config, token_stats, device)
     history = []
     early_stopper = EarlyStopper(
         patience=config.early_stopping.patience,
@@ -701,7 +733,7 @@ def train_sae_streaming(
                 for start in range(0, full_count, config.sae.batch_size):
                     xb = token_batch[start : start + config.sae.batch_size].float().to(device)
                     loss, recon_loss, l1_loss, x_hat, z = _run_sae_step(
-                        sae, optimizer, xb, scaler, config.sae, config.optim_config, device, scheduler
+                        sae, optimizer, xb, scaler, config.sae, config.optim_config, device, scheduler, token_std
                     )
                     train_loss_sum += float(loss.item()) * xb.shape[0]
                     train_mse_sum += float(recon_loss.item()) * xb.shape[0]
@@ -720,7 +752,7 @@ def train_sae_streaming(
             if carry is not None and carry.numel() > 0:
                 xb = carry.float().to(device)
                 loss, recon_loss, l1_loss, x_hat, z = _run_sae_step(
-                    sae, optimizer, xb, scaler, config.sae, config.optim_config, device, scheduler
+                    sae, optimizer, xb, scaler, config.sae, config.optim_config, device, scheduler, token_std
                 )
                 train_loss_sum += float(loss.item()) * xb.shape[0]
                 train_mse_sum += float(recon_loss.item()) * xb.shape[0]
@@ -741,6 +773,7 @@ def train_sae_streaming(
             train_rows,
             time.perf_counter() - epoch_start_time,
             config,
+            token_stats=eval_stats,
         )
         _, should_stop = early_stopper.step(row["normalized_mse"], sae, row)
         history.append(row)
@@ -801,6 +834,7 @@ def train_sae_cached(
     optimizer = _make_optimizer(sae, config.optim_config)
     scaler = _make_grad_scaler(device, config.optim_config.use_amp, get_torch_dtype(config.sae.amp_dtype))
     scheduler = _make_scheduler(optimizer, config.optim_config)
+    token_std, eval_stats = _raw_space_stats(config, token_stats, device)
     history = []
     early_stopper = EarlyStopper(
         patience=config.early_stopping.patience,
@@ -827,7 +861,7 @@ def train_sae_cached(
         ):
             xb = xb_cpu.to(device, non_blocking=True).float()
             loss, recon_loss, l1_loss, x_hat, z = _run_sae_step(
-                sae, optimizer, xb, scaler, config.sae, config.optim_config, device, scheduler
+                sae, optimizer, xb, scaler, config.sae, config.optim_config, device, scheduler, token_std
             )
             train_loss_sum += float(loss.item()) * xb.shape[0]
             train_mse_sum += float(recon_loss.item()) * xb.shape[0]
@@ -846,6 +880,7 @@ def train_sae_cached(
             train_rows,
             time.perf_counter() - epoch_start_time,
             config,
+            token_stats=eval_stats,
         )
         _, should_stop = early_stopper.step(row["normalized_mse"], sae, row)
         history.append(row)
@@ -894,13 +929,14 @@ def train_sae_auto(model, loader, val_tokens, token_stats, input_dim, hidden_dim
     )
 
 
-def _build_epoch_row(sae, val_tokens, hidden_dim, epoch, train_loss_sum, train_mse_sum, train_l1_sum, train_rows, epoch_seconds, config):
+def _build_epoch_row(sae, val_tokens, hidden_dim, epoch, train_loss_sum, train_mse_sum, train_l1_sum, train_rows, epoch_seconds, config, token_stats=None):
     val_metrics = evaluate_sae_tokens(
         sae,
         val_tokens,
         batch_size=config.sae.batch_size,
         threshold=config.sae.active_threshold,
         device=config.extraction_config.device,
+        token_stats=token_stats,
     )
     active_mean_count = val_metrics["mean_l0"]
     active_total = int(hidden_dim)
@@ -920,15 +956,36 @@ def _build_epoch_row(sae, val_tokens, hidden_dim, epoch, train_loss_sum, train_m
 
 
 @torch.no_grad()
-def evaluate_sae_tokens(sae, tokens_norm, batch_size, threshold, device):
+def evaluate_sae_tokens(sae, tokens_norm, batch_size, threshold, device, token_stats=None):
+    """검증 지표. tokens_norm은 정규화된 활성이다.
+
+    token_stats(mean/std, device 위)를 주면 재구성 오차와 cosine을 **denorm 공간**에서
+    잰다 — 학습 손실이 recon_space='raw'일 때 지표도 같은 공간이어야 체크포인트 선정과
+    early stopping이 최적화 대상과 어긋나지 않는다. None이면 기존대로 정규화 공간이다.
+
+    raw 분산은 따로 한 바퀴 돌지 않고 스트리밍으로 모은다: tokens_norm은 차원별 평균이 0이라
+    (x_norm*sigma)가 곧 차원별 중심화된 raw 편차다."""
     sae.eval().to(device)
     total_sse = total_cosine = total_l0 = total_l0_raw = total_rows = total_elements = 0.0
+    total_var_raw = 0.0
+    raw_space = token_stats is not None
+    if raw_space:
+        sd = token_stats["std"].to(device).float()
+        mu = token_stats["mean"].to(device).float()
     hidden_dim = None
     for start in tqdm(range(0, tokens_norm.shape[0], batch_size), leave=False, desc="Eval", **TQDM_KW):
         xb = tokens_norm[start : start + batch_size].float().to(device, non_blocking=True)
         x_hat, z = sae(xb)
-        total_sse += float((xb - x_hat).square().sum().item())
-        total_cosine += float(F.cosine_similarity(xb, x_hat, dim=1).sum().item())
+        if raw_space:
+            xr = xb * sd + mu
+            xhr = x_hat * sd + mu
+            total_sse += float((xr - xhr).square().sum().item())
+            total_var_raw += float((xb * sd).square().sum().item())
+            total_cosine += float(F.cosine_similarity(xr, xhr, dim=1).sum().item())
+            del xr, xhr
+        else:
+            total_sse += float((xb - x_hat).square().sum().item())
+            total_cosine += float(F.cosine_similarity(xb, x_hat, dim=1).sum().item())
         total_l0 += float((z > threshold).sum().item())
         # ReLU 출력이라 z >= 0 이고, z > 0 은 z != 0 과 같다. count_nonzero는 bool 임시
         # 텐서를 만들지 않고 바로 리듀스하므로 (z > 0) 대비 검증 피크 VRAM이 늘지 않는다
@@ -941,12 +998,17 @@ def evaluate_sae_tokens(sae, tokens_norm, batch_size, threshold, device):
         del xb, x_hat, z
 
     mse = total_sse / max(1, total_elements)
-    variance = float(tokens_norm.float().var(unbiased=False).item())
+    if raw_space:
+        # 분모도 raw 공간의 (차원별 중심화된) 분산이라야 FVU가 된다
+        variance = total_var_raw / max(1, total_elements)
+    else:
+        variance = float(tokens_norm.float().var(unbiased=False).item())
     l0_raw = total_l0_raw / max(1, total_rows)
     return {
         "mse": mse,
         "normalized_mse": mse / max(variance, 1e-12),
         "val_nmse": mse / max(variance, 1e-12),
+        "recon_space": "raw" if raw_space else "norm",
         "cosine": total_cosine / max(1, total_rows),
         "mean_l0": total_l0 / max(1, total_rows),
         "l0_raw": l0_raw,

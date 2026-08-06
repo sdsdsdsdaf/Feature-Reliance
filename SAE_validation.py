@@ -114,6 +114,13 @@ SAE_ACTIVE_THRESHOLD = 0.2
 L1_REG = 2.4e-3
 SAE_BATCH_SIZE = 7096
 MODEL_COMPILE = True
+# 재구성 손실/지표를 어느 공간에서 잴 것인가.
+#   "raw"  — raw z -> norm -> SAE -> denorm -> raw z 와 비교. 배포 경로와 같은 공간이다
+#            (intervention이 recon*sigma+mu 로 되돌려 ViT에 다시 꽂는다).
+#   "norm" — 정규화 공간(이전 동작). 최적화 대상과 배포 현실이 다른 공간에 있게 된다.
+# 주의: "raw"면 recon 항이 mean(sigma^2)배(실측 약 2.5~3.2) 커져 sparsity 압력이 그만큼
+# 약해진다. 같은 L0를 유지하려면 L1_REG를 대략 3배 올려야 한다.
+SAE_RECON_SPACE = "raw"
 
 # AMP / safety checks
 USE_AMP = torch.cuda.is_available()
@@ -260,6 +267,7 @@ def build_default_config():
     config.sae.amp_dtype = SAE_AMP_DTYPE
     config.sae.check_finite = SAE_CHECK_FINITE
     config.sae.matmul_precision = MATMUL_PRECISION
+    config.sae.recon_space = SAE_RECON_SPACE
 
     config.early_stopping.patience = EARLY_STOPPING_PATIENCE
     config.early_stopping.eps = EARLY_STOPPING_EPS
@@ -492,6 +500,9 @@ def run_sae_trial(config, trial_dir, trial_id=None):
         batch_size=config.sae.batch_size,
         threshold=config.sae.active_threshold,
         device=config.extraction_config.device,
+        # recon_space='raw'면 학습 손실과 같은 공간에서 재야 한다. 그래야 summary의
+        # val_nmse가 체크포인트 선정 기준과 같은 값이 된다.
+        token_stats=token_stats if str(config.sae.recon_space).lower() == "raw" else None,
     )
 
     latent_masking_alignment = run_latent_masking_alignment_validation(

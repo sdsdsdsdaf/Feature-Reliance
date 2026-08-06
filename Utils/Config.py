@@ -382,6 +382,20 @@ class SAEConfig:
     amp_dtype: str = "bfloat16"
     check_finite: bool = True
     matmul_precision: str = "high"
+    # 재구성 손실과 검증 지표를 어느 공간에서 잴 것인가.
+    #   "norm" — 정규화 공간. F.mse_loss(x_hat, x_norm). 모든 차원을 균등 가중한다.
+    #   "raw"  — denorm 공간. denorm(x_hat)과 raw x를 비교한다(기본).
+    #
+    # SAE는 정규화된 입력으로 학습하지만 실제 배포에서는 denorm된 재구성이 ViT에 다시
+    # 꽂힌다(Utils/SAE_plot_utils.reconstruct_tokens_with_latent_scaling). "norm"이면
+    # 최적화 대상과 배포 현실이 다른 공간에 있게 된다.
+    #
+    # mu는 상쇄되므로 (x_hat*sigma + mu) - (x*sigma + mu) = (x_hat - x)*sigma 이고,
+    # 결국 sigma로 가중한 MSE다. denorm을 실제로 계산하면 큰 값끼리 빼면서 정밀도만 잃는다.
+    #
+    # 주의: recon 항의 스케일이 mean(sigma^2)배 커진다(실측 약 2.5~3.2). sparsity 압력이
+    # lambda*L1/recon 이므로 lambda를 그만큼 올려야 같은 L0가 나온다.
+    recon_space: str = "raw"  # "norm" | "raw"
 
 
 @dataclass
