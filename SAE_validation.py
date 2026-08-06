@@ -122,12 +122,20 @@ SAE_CHECK_FINITE = True
 MATMUL_PRECISION = "high"
 
 # Early stopping
-# patience는 "개선 없는 검증 횟수"라 EVAL_EVERY_STEPS와 곱해져야 스텝 수가 된다.
-# 30 x 200 = 6,000 스텝이었다. EVAL_EVERY_STEPS를 1000으로 올리면서 그대로 두면
-# 30,000 스텝이 되어 5배 느슨해지고, 이전 실행에서 62% 지점(44,000/70,774 스텝)에
-# 걸렸던 조기 종료가 아예 안 걸린다 — 검증에서 아낀 시간보다 학습이 더 길어진다.
-# 6 x 1000 = 6,000 스텝으로 유효 인내를 그대로 유지한다.
-EARLY_STOPPING_PATIENCE = 6
+# None = 끔. token_budget 모드에서는 예산을 끝까지 쓴다 — PatchSAE 참조 구현도 고정 토큰
+# 예산으로 돌리고 조기 종료가 없다.
+#
+# 왜 껐나: patience는 val_nmse만 보는데, 학습 중 SAE는 "nmse는 평평한 채 L0만 하강"하는
+# 구간을 길게 지난다. val_nmse의 노이즈가 +-0.001인 데 반해 EARLY_STOPPING_EPS는 5e-5로
+# 20배 작아서, 개선이 노이즈에 묻히면 patience가 그 하강 도중에 걸려버린다. 실측(2026-08-06
+# grid_lambda_low)에서 세 trial이 예산의 57% / 18% / 33% 지점에서 멈췄고 셋 다 멈추는
+# 순간까지 active가 단조 감소 중이었다 — 평형에 도달한 trial이 하나도 없었다. 그 탓에
+# l0_raw가 lambda에 대해 비단조로 나왔다(422 / 575 / 176). lambda의 성질이 아니라 각
+# trial이 하강 곡선의 다른 지점에서 잘린 결과다.
+#
+# patience=None이어도 best checkpoint 선정(L0 제약 하)은 그대로 돈다 — 조기 종료 카운팅과
+# 체크포인트 선정은 분리돼 있다(Utils/early_stopping.py).
+EARLY_STOPPING_PATIENCE = None
 EARLY_STOPPING_EPS = 5e-5
 EARLY_STOPPING_VERBOSE = False
 
@@ -160,7 +168,7 @@ SPARSITY_L0_MAX = 800.0
 # 그건 의도한 것이다 — 이번 grid의 목적은 제약 안에서 고르는 게 아니라 희소성/재구성
 # 트레이드오프 곡선을 세 점으로 재는 것이다. l0_max는 폭주 방지용으로만 남는다.
 GRID_SPACE = {
-    "sae.l1_reg": [0.6e-3, 0.85e-3, 1.2e-3],
+    "sae.l1_reg": [0.6e-4, 0.85e-4, 1.2e-4, 2.4e-4, 4.8e-4],
 }
 _UNUSED_GRID_SPACE_FULL = {
     "sae.expansion": [16, 32, 64],
