@@ -1,6 +1,7 @@
 import gc
 import math
 import os
+import warnings
 from collections import Counter
 from pathlib import Path
 
@@ -25,6 +26,15 @@ from Utils.early_stopping import unwrap_compiled_model
 
 
 IMAGENETTE_TO_IMAGENET_IDX = torch.tensor([0, 217, 482, 491, 497, 566, 569, 571, 574, 701], dtype=torch.long)
+
+
+def imagenet_label_map_for(dataset_type):
+    """데이터셋 라벨을 1000-way classifier 인덱스로 옮기는 매핑을 돌려준다.
+
+    imagenette는 10개 클래스를 0..9로 주므로 ImageNet-1k 인덱스로 옮겨야 한다.
+    ImageNet-1k는 이미 0..999라 매핑이 필요 없고, 10개짜리 매핑을 적용하면
+    라벨 10 이상에서 인덱스 에러가 난다. 매핑이 필요 없으면 None."""
+    return IMAGENETTE_TO_IMAGENET_IDX if str(dataset_type).lower() == "imagenette" else None
 PERTURBATION_KINDS = ("grayscale", "blur", "patch_shuffle")
 PERTURBATION_TOP_K = 20
 PERTURBATION_OVERLAY_TOP_K = 12
@@ -32,12 +42,19 @@ PERTURBATION_BATCH_SIZE = 1
 PERTURBATION_ENCODE_CHUNK_SIZE = 256
 PERTURBATION_BLUR_KERNEL = 7
 PERTURBATION_SHUFFLE_SEED = 0
+PERTURBATION_SCORE_MODES = ("absolute", "relative", "specific", "relative_specific")
+# 기본은 기존 동작이다. relative/specific은 실측 문제(발화 빈도 1~3위 latent가 세 kind
+# 전부의 상위를 점령)에 대한 처방이지만, 재구성 품질을 먼저 올린 뒤 전환할 값이다.
+PERTURBATION_SCORE_MODE = "absolute"
+PERTURBATION_MIN_FREQUENCY = 0.0
 INTERVENTION_TOP_K = 12
 INTERVENTION_RANDOM_TRIALS = 3
 INTERVENTION_RANDOM_SEED = 0
 INTERVENTION_ALPHA_VALUES = [0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5]
 INTERVENTION_BATCH_SIZE = 1
-INTERVENTION_SAE_CHUNK_SIZE = 128
+# 128은 SAE encode/decode를 작은 matmul로 잘게 쪼개 GPU를 못 채운다. 512에서 처리량이
+# 416 -> 593 img/s(측정, hidden 49152)로 오르고 그 위로는 평평하다. 피크 VRAM은 0.43 -> 0.64 GiB.
+INTERVENTION_SAE_CHUNK_SIZE = 512
 INTERVENTION_MAX_BATCHES = None
 INTERVENTION_TOKEN_SCOPE = "all"
 PERTURBATION_FAMILY_NAMES = {
@@ -564,7 +581,7 @@ def collect_patch_latents_for_batch(images, model, sae, token_stats, target_bloc
     return z.reshape(patch_tokens.shape[0], patch_tokens.shape[1], -1)
 
 
-def _ranking_records(score, frequency, mean_activation, peak_delta, top_k=PERTURBATION_TOP_K):
+def _ranking_records(score, score_abs, frequency, mean_activation, peak_delta, top_k=PERTURBATION_TOP_K):
     k = min(top_k, score.numel())
     top_scores, top_ids = torch.topk(score, k=k)
     records = []
@@ -573,6 +590,7 @@ def _ranking_records(score, frequency, mean_activation, peak_delta, top_k=PERTUR
             "rank": rank,
             "latent_id": int(latent_id),
             "score_delta": float(value),
+            "score_absolute": float(score_abs[latent_id].item()),
             "frequency": float(frequency[latent_id].item()),
             "mean_activation": float(mean_activation[latent_id].item()),
             "peak_abs_delta": float(peak_delta[latent_id].item()),
@@ -580,8 +598,53 @@ def _ranking_records(score, frequency, mean_activation, peak_delta, top_k=PERTUR
     return {"latent_ids": top_ids.tolist(), "records": records}
 
 
+def perturbation_scores(abs_scores, frequency, mean_activation, kinds, score_mode=PERTURBATION_SCORE_MODE, min_frequency=PERTURBATION_MIN_FREQUENCY, eps=1e-8):
+    """섭동 민감도 점수. 상대화와 특이도를 독립적으로 켜고 끈다.
+
+    absolute          : mean |dz|  — 기존 동작. 절대 변화량이라 항상 크게 켜지는 latent가
+                        섭동 민감도와 무관하게 이긴다(발화 빈도 1~3위가 세 kind 전부를 점령했다).
+    relative  (상대화) : mean |dz| / mean z — 자기 크기 대비 몇 % 흔들렸는가.
+    specific  (특이도) : s(kind) - mean(다른 kinds) — 아무 섭동에나 반응하는 latent는 0 근처로
+                        내려가고, 그 섭동에만 반응하는 latent만 남는다. kind가 2개 이상이어야 한다.
+    relative_specific : 상대화한 값으로 특이도 대비. 스케일이 제거된 뒤 대비하므로 자연스러운 합성.
+
+    min_frequency는 상대화의 분모 폭주를 막는 하한이다 — mean z가 0에 가까운 latent는
+    조금만 흔들려도 상대 변화가 무한대로 커진다. 0이면 하한 없음(= absolute가 기존과 동일).
+    """
+    mode = str(score_mode).lower()
+    if mode not in PERTURBATION_SCORE_MODES:
+        raise ValueError(f"Unknown score_mode: {score_mode!r}. one of {PERTURBATION_SCORE_MODES}")
+
+    relative = mode in ("relative", "relative_specific")
+    if relative:
+        base = {k: abs_scores[k] / (mean_activation[k] + eps) for k in kinds}
+        if not min_frequency:
+            warnings.warn(
+                f"score_mode={mode!r}인데 min_frequency=0이다. mean z가 0에 가까운 희소 latent가 "
+                "분모 때문에 상위를 점령한다. 하한을 주는 것을 권한다.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+    else:
+        base = dict(abs_scores)
+
+    if mode in ("specific", "relative_specific"):
+        if len(kinds) < 2:
+            raise ValueError("specificity needs at least 2 perturbation kinds to contrast against.")
+        total = torch.stack([base[k] for k in kinds]).sum(dim=0)
+        scores = {k: base[k] - (total - base[k]) / (len(kinds) - 1) for k in kinds}
+    else:
+        scores = base
+
+    if min_frequency:
+        for k in kinds:
+            scores[k] = scores[k].masked_fill(frequency[k] < float(min_frequency), float("-inf"))
+    return scores
+
+
 @torch.no_grad()
-def rank_perturbation_sensitive_latents(model, dataset, sae, token_stats, config, mean, std, image_indices, kinds=PERTURBATION_KINDS, batch_size=PERTURBATION_BATCH_SIZE, top_k=PERTURBATION_TOP_K):
+def accumulate_perturbation_deltas(model, dataset, sae, token_stats, config, mean, std, image_indices, kinds=PERTURBATION_KINDS, batch_size=PERTURBATION_BATCH_SIZE):
+    """섭동 전/후 latent 통계를 모은다. 채점과 분리돼 있어 한 번 모으면 여러 score_mode로 채점할 수 있다."""
     accum = {kind: None for kind in kinds}
     count = 0
     iterator = list(range(0, len(image_indices), batch_size))
@@ -609,15 +672,31 @@ def rank_perturbation_sensitive_latents(model, dataset, sae, token_stats, config
         count += z_orig.shape[0] * z_orig.shape[1]
         del z_orig, images
         gc.collect()
+    return accum, count
+
+
+def score_perturbation_accum(accum, count, kinds=PERTURBATION_KINDS, top_k=PERTURBATION_TOP_K, score_mode=PERTURBATION_SCORE_MODE, min_frequency=PERTURBATION_MIN_FREQUENCY):
+    """모아둔 통계를 지정한 모드로 채점해 top-k 랭킹을 만든다."""
+    n = max(1, count)
+    abs_scores = {k: accum[k]["delta_sum"] / n for k in kinds}
+    frequency = {k: accum[k]["freq_sum"] / n for k in kinds}
+    mean_activation = {k: accum[k]["mean_sum"] / n for k in kinds}
+    scores = perturbation_scores(abs_scores, frequency, mean_activation, kinds, score_mode=score_mode, min_frequency=min_frequency)
 
     results = {}
     for kind in kinds:
-        item = accum[kind]
-        score = item["delta_sum"] / max(1, count)
-        frequency = item["freq_sum"] / max(1, count)
-        mean_activation = item["mean_sum"] / max(1, count)
-        results[kind] = _ranking_records(score, frequency, mean_activation, item["peak_delta"], top_k=top_k)
+        finite = int(torch.isfinite(scores[kind]).sum())
+        if finite < top_k:
+            raise ValueError(
+                f"min_frequency={min_frequency}가 너무 높다 — {kind}에서 후보가 {finite}개뿐인데 top_k={top_k}다."
+            )
+        results[kind] = _ranking_records(scores[kind], abs_scores[kind], frequency[kind], mean_activation[kind], accum[kind]["peak_delta"], top_k=top_k)
     return results
+
+
+def rank_perturbation_sensitive_latents(model, dataset, sae, token_stats, config, mean, std, image_indices, kinds=PERTURBATION_KINDS, batch_size=PERTURBATION_BATCH_SIZE, top_k=PERTURBATION_TOP_K, score_mode=PERTURBATION_SCORE_MODE, min_frequency=PERTURBATION_MIN_FREQUENCY):
+    accum, count = accumulate_perturbation_deltas(model, dataset, sae, token_stats, config, mean, std, image_indices, kinds=kinds, batch_size=batch_size)
+    return score_perturbation_accum(accum, count, kinds=kinds, top_k=top_k, score_mode=score_mode, min_frequency=min_frequency)
 
 
 def plot_perturbation_topk_overlays(model, dataset, sae, token_stats, config, mean, std, image_idx=0, rankings=None, top_k=PERTURBATION_OVERLAY_TOP_K, map_mode="delta"):
@@ -646,9 +725,18 @@ def plot_perturbation_topk_overlays(model, dataset, sae, token_stats, config, me
     return fig, {"latent_ids": latent_ids_by_kind}
 
 
-def make_intervention_eval_loader(dataset, indices, batch_size=INTERVENTION_BATCH_SIZE):
+def make_intervention_eval_loader(dataset, indices, batch_size=INTERVENTION_BATCH_SIZE, num_workers=0):
+    # 이 loader는 (spec x alpha) 구성마다 한 바퀴씩, 기본 105번 다시 돈다. 이미지 수가
+    # 커지면 JPEG 디코딩이 지배하므로 워커를 붙일 수 있게 열어둔다.
     subset = torch.utils.data.Subset(dataset, [int(idx) for idx in indices])
-    return DataLoader(subset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=torch.cuda.is_available())
+    return DataLoader(
+        subset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=torch.cuda.is_available(),
+        persistent_workers=num_workers > 0,
+    )
 
 
 def _as_long_tensor(ids):
@@ -761,53 +849,70 @@ def run_model_with_latent_intervention(images, latent_ids, alpha, model, sae, to
 
 
 @torch.no_grad()
-def evaluate_latent_intervention_curve(model, sae, token_stats, specs, loader, target_block, device, alphas=INTERVENTION_ALPHA_VALUES, max_batches=INTERVENTION_MAX_BATCHES):
+def evaluate_latent_intervention_curve(model, sae, token_stats, specs, loader, target_block, device, alphas=INTERVENTION_ALPHA_VALUES, max_batches=INTERVENTION_MAX_BATCHES, label_to_imagenet=IMAGENETTE_TO_IMAGENET_IDX):
+    """(spec x alpha) 구성마다 clean 대비 개입 후 logit 변화를 집계한다.
+
+    이미지 루프가 바깥에 있다 — clean forward와 이미지 디코딩은 spec/alpha와 무관하므로
+    구성 수(기본 15 x 7 = 105)만큼 반복하면 그만큼 낭비다. 배치 하나를 읽어서 clean을 한 번만
+    돌리고, 그 배치에 대해 모든 구성의 개입 forward를 돌린다. 결과 record의 순서와 값은
+    구성별 루프가 바깥이던 때와 같다(합산은 배치 단위 가중 평균이라 순서에 무관)."""
     device = torch.device(device)
-    records = []
     model.eval().to(device)
-    for (family, baseline), latent_ids in specs.items():
-        for alpha in alphas:
-            js_sum = ce_sum = logit_l1_sum = acc_sum = clean_acc_sum = 0.0
-            rows = 0
-            for batch_idx, (images, labels) in enumerate(tqdm(loader, desc=f"latent intervention curve [{INTERVENTION_TOKEN_SCOPE}]", leave=False)):
-                if max_batches is not None and batch_idx >= int(max_batches):
-                    break
-                images = images.to(device)
-                labels_cpu = labels.detach().cpu().long()
-                clean_logits = model(images).detach().cpu()
+
+    keys = [(family, baseline, float(alpha)) for (family, baseline) in specs for alpha in alphas]
+    acc = {k: {"js": 0.0, "ce": 0.0, "logit_l1": 0.0, "int_acc": 0.0, "clean_acc": 0.0, "rows": 0} for k in keys}
+
+    n_batches = len(loader) if max_batches is None else min(len(loader), int(max_batches))
+    for batch_idx, (images, labels) in enumerate(tqdm(loader, total=n_batches, desc=f"latent intervention curve [{INTERVENTION_TOKEN_SCOPE}] x{len(keys)}", leave=False)):
+        if max_batches is not None and batch_idx >= int(max_batches):
+            break
+        images = images.to(device)
+        n = images.shape[0]
+        labels_cpu = labels.detach().cpu().long()
+        labels_imagenet = labels_cpu if label_to_imagenet is None else label_to_imagenet[labels_cpu]
+
+        clean_logits = model(images).detach().cpu()
+        clean_logp = F.log_softmax(clean_logits, dim=1)
+        clean_prob = clean_logp.exp()
+        clean_acc = (clean_logits.argmax(dim=1) == labels_imagenet).float().mean().item()
+
+        for (family, baseline), latent_ids in specs.items():
+            for alpha in alphas:
                 int_logits = run_model_with_latent_intervention(images, latent_ids, alpha, model, sae, token_stats, target_block, INTERVENTION_TOKEN_SCOPE, device)
-                labels_imagenet = IMAGENETTE_TO_IMAGENET_IDX[labels_cpu]
-                clean_pred = clean_logits.argmax(dim=1)
-                int_pred = int_logits.argmax(dim=1)
-                clean_acc = (clean_pred == labels_imagenet).float().mean().item()
-                intervention_acc = (int_pred == labels_imagenet).float().mean().item()
-                clean_logp = F.log_softmax(clean_logits, dim=1)
                 int_logp = F.log_softmax(int_logits, dim=1)
-                m = 0.5 * (clean_logp.exp() + int_logp.exp()).clamp_min(1e-12)
+                m = 0.5 * (clean_prob + int_logp.exp()).clamp_min(1e-12)
                 js = 0.5 * (F.kl_div(clean_logp, m, reduction="batchmean") + F.kl_div(int_logp, m, reduction="batchmean"))
                 ce = F.cross_entropy(int_logits, labels_imagenet)
-                js_sum += float(js.item()) * images.shape[0]
-                ce_sum += float(ce.item()) * images.shape[0]
-                logit_l1_sum += float((int_logits - clean_logits).abs().mean(dim=1).sum().item())
-                acc_sum += intervention_acc * images.shape[0]
-                clean_acc_sum += clean_acc * images.shape[0]
-                rows += images.shape[0]
-            clean_acc = clean_acc_sum / max(1, rows)
-            intervention_acc = acc_sum / max(1, rows)
-            records.append({
-                "family": family,
-                "baseline": baseline,
-                "name": f"{family}/{baseline}",
-                "alpha": float(alpha),
-                "js_divergence": js_sum / max(1, rows),
-                "cross_entropy": ce_sum / max(1, rows),
-                "logit_l1": logit_l1_sum / max(1, rows),
-                "clean_acc": clean_acc,
-                "intervention_acc": intervention_acc,
-                "acc_delta": intervention_acc - clean_acc,
-                "acc_drop": clean_acc - intervention_acc,
-                "n": rows,
-            })
+                intervention_acc = (int_logits.argmax(dim=1) == labels_imagenet).float().mean().item()
+
+                a = acc[(family, baseline, float(alpha))]
+                a["js"] += float(js.item()) * n
+                a["ce"] += float(ce.item()) * n
+                a["logit_l1"] += float((int_logits - clean_logits).abs().mean(dim=1).sum().item())
+                a["int_acc"] += intervention_acc * n
+                a["clean_acc"] += clean_acc * n
+                a["rows"] += n
+
+    records = []
+    for family, baseline, alpha in keys:
+        a = acc[(family, baseline, alpha)]
+        rows = max(1, a["rows"])
+        clean_acc = a["clean_acc"] / rows
+        intervention_acc = a["int_acc"] / rows
+        records.append({
+            "family": family,
+            "baseline": baseline,
+            "name": f"{family}/{baseline}",
+            "alpha": float(alpha),
+            "js_divergence": a["js"] / rows,
+            "cross_entropy": a["ce"] / rows,
+            "logit_l1": a["logit_l1"] / rows,
+            "clean_acc": clean_acc,
+            "intervention_acc": intervention_acc,
+            "acc_delta": intervention_acc - clean_acc,
+            "acc_drop": clean_acc - intervention_acc,
+            "n": a["rows"],
+        })
     return records
 
 
@@ -899,14 +1004,42 @@ def save_trial_plots(trial_dir, model, train_history, sae, token_stats, val_toke
     )
     save_plot(fig, plots_dir, "patch_token_sae_channel_maps_image_3", dpi=config.output.plot_dpi)
 
-    perturbation_indices = list(range(min(12, len(val_dataset))))
-    perturbation_rankings = rank_perturbation_sensitive_latents(model, val_dataset, sae, token_stats, config, mean, std, image_indices=perturbation_indices)
+    # 랭킹과 intervention은 같은 val 부분집합을 쓴다 — 여기서 고른 cue latent를 같은
+    # 이미지에서 검증한다. 개수는 config.diagnostics.eval_images가 정한다(None이면 val 전체).
+    diag = getattr(config, "diagnostics", None)
+    n_eval = getattr(diag, "eval_images", 12) if diag is not None else 12
+    n_eval = len(val_dataset) if n_eval is None else min(int(n_eval), len(val_dataset))
+    perturbation_indices = list(range(n_eval))
+    ranking_bs = getattr(diag, "ranking_batch_size", PERTURBATION_BATCH_SIZE) if diag is not None else PERTURBATION_BATCH_SIZE
+    intervention_bs = getattr(diag, "eval_batch_size", INTERVENTION_BATCH_SIZE) if diag is not None else INTERVENTION_BATCH_SIZE
+    alphas = (getattr(diag, "intervention_alphas", None) if diag is not None else None) or INTERVENTION_ALPHA_VALUES
+    score_mode = getattr(diag, "perturbation_score_mode", PERTURBATION_SCORE_MODE) if diag is not None else PERTURBATION_SCORE_MODE
+    min_freq = getattr(diag, "perturbation_min_frequency", PERTURBATION_MIN_FREQUENCY) if diag is not None else PERTURBATION_MIN_FREQUENCY
+    print(f"diagnostics eval images: {n_eval:,} / {len(val_dataset):,} (ranking bs {ranking_bs}, intervention bs {intervention_bs}, alphas {list(alphas)})")
+    print(f"perturbation scoring   : mode={score_mode} min_frequency={min_freq}")
+
+    perturbation_rankings = rank_perturbation_sensitive_latents(model, val_dataset, sae, token_stats, config, mean, std, image_indices=perturbation_indices, batch_size=ranking_bs, score_mode=score_mode, min_frequency=min_freq)
     fig, perturbation_overlay_info = plot_perturbation_topk_overlays(model, val_dataset, sae, token_stats, config, mean, std, image_idx=0, rankings=perturbation_rankings)
     save_plot(fig, plots_dir, "perturbation_topk_overlays_image_0", dpi=config.output.plot_dpi)
 
     intervention_specs = build_intervention_latent_specs(perturbation_rankings, _hidden_dim(sae), sae_latent_frequency, sae_latent_stats)
-    intervention_loader = make_intervention_eval_loader(val_dataset, perturbation_indices)
-    intervention_records = evaluate_latent_intervention_curve(model, sae, token_stats, intervention_specs, intervention_loader, config.hook.target_block, config.extraction_config.device)
+    intervention_loader = make_intervention_eval_loader(
+        val_dataset,
+        perturbation_indices,
+        batch_size=intervention_bs,
+        num_workers=config.data_config.num_workers,
+    )
+    intervention_records = evaluate_latent_intervention_curve(
+        model,
+        sae,
+        token_stats,
+        intervention_specs,
+        intervention_loader,
+        config.hook.target_block,
+        config.extraction_config.device,
+        alphas=alphas,
+        label_to_imagenet=imagenet_label_map_for(config.val_dataset_spec.dataset_type),
+    )
     print_intervention_curve_summary(intervention_records, metric="js_divergence")
     fig = plot_intervention_curve(intervention_records, metric="js_divergence", figsize=(13, 7), logy=False)
     save_plot(fig, plots_dir, "intervention_curve_js_divergence", dpi=config.output.plot_dpi)
