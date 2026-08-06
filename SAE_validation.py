@@ -52,7 +52,7 @@ OUTPUT_ROOT = "outputs/SAE_validation"
 # trial 재사용은 trial_NNNN 디렉터리 이름만 보고 판정한다(override 값은 안 본다). grid를
 # 바꿀 때 이 이름을 그대로 두면 이전 grid의 완료된 trial_0000이 새 override 라벨을 달고
 # 재사용된다 — 조용히 틀린 결과가 나온다. GRID_SPACE를 바꾸면 여기도 반드시 바꾼다.
-GRID_DIR_NAME = "grid_lambda_low"
+GRID_DIR_NAME = "grid_raw_loss"
 
 # Dataset / backbone
 # "imagenet" = HF 캐시(data/hf_cache)의 ImageNet-1k, 1000 클래스. PatchSAE와 같은 학습 분포다.
@@ -109,9 +109,11 @@ B_DEC_INIT_GRID = [B_DEC_INIT_MODE]  # Set multiple modes here for grid search.
 # 오래 걸리지 않도록 낮게 잡는다 (b_dec는 학습되는 파라미터라 초기값일 뿐이다).
 B_DEC_INIT_GEOM_MAX_ITER = 10
 SAE_ACTIVE_THRESHOLD = 0.2
-# 우리 재구성 항은 F.mse_loss(원소 평균)라 PatchSAE의 ||x||2 나누기 규약과 달리 활성 스케일에
-# 의존한다. PatchSAE의 8e-5를 우리 규약으로 환산: ||x - b_dec||2 실측 30.25 x 8e-5 = 2.4e-3.
-L1_REG = 2.4e-3
+# PatchSAE의 8e-5를 우리 규약으로 환산: ||x - b_dec||2 실측 30.25 x 8e-5 = 2.4e-3.
+# 여기에 SAE_RECON_SPACE="raw" 보정 3배를 곱한 값이다 (recon 항이 mean(sigma^2)만큼
+# 커지므로 같은 sparsity 압력을 유지하려면 lambda도 같이 커져야 한다).
+# grid가 켜져 있으면 GRID_SPACE가 이 값을 덮어쓴다.
+L1_REG = 7.2e-3
 SAE_BATCH_SIZE = 7096
 MODEL_COMPILE = True
 # 재구성 손실/지표를 어느 공간에서 잴 것인가.
@@ -177,11 +179,17 @@ SPARSITY_L0_MAX = 800.0
 # 자기 하강 곡선의 다른 지점에서 잘린 결과다(멈추는 순간까지 active가 단조 감소 중이었다).
 # EARLY_STOPPING_PATIENCE=None으로 끄고 다시 돌린다 — 위 숫자는 하한으로만 읽을 것.
 #
+# **SAE_RECON_SPACE="raw"로 바뀌면서 lambda를 3배 올렸다.** recon 항이 mean(sigma^2)배
+# (실측 약 2.5~3.2) 커지므로 sparsity 압력 lambda*L1/recon 이 그만큼 약해진다. 3배는
+# 그 보정이지 정밀 측정이 아니다 — 첫 trial의 l0_raw를 보고 조정할 것.
+#   0.6e-3 -> 1.8e-3,  0.85e-3 -> 2.55e-3,  1.2e-3 -> 3.6e-3
+# 위 실측표의 lambda 값들은 전부 norm-space 손실 기준이라 직접 비교하면 안 된다.
+#
 # 셋 다 feasible할 전망이라 선정은 사실상 val_nmse가 하고 가장 낮은 lambda가 뽑힌다.
 # 그건 의도한 것이다 — 이번 grid의 목적은 제약 안에서 고르는 게 아니라 희소성/재구성
 # 트레이드오프 곡선을 세 점으로 재는 것이다. l0_max는 폭주 방지용으로만 남는다.
 GRID_SPACE = {
-    "sae.l1_reg": [0.6e-3, 0.85e-3, 1.2e-3],
+    "sae.l1_reg": [1.8e-3, 2.55e-3, 3.6e-3],
 }
 _UNUSED_GRID_SPACE_FULL = {
     "sae.expansion": [16, 32, 64],
