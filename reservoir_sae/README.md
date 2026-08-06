@@ -261,9 +261,11 @@ Default SAE hyperparameters:
   "expansion": 32,
   "dec_bias_mode": "geom",
   "active_threshold": 0.2,
-  "l1_reg": 3e-5,
+  "l1_reg": 2.4e-3,
+  "lr": 4e-4,
+  "lr_warmup_steps": 500,
   "batch_size": 7096,
-  "bias_init_geom_max_iter": 100,
+  "bias_init_geom_max_iter": 10,
   "bias_init_geom_tol": 1e-5,
   "model_compile": true,
   "amp_dtype": "bfloat16",
@@ -271,6 +273,17 @@ Default SAE hyperparameters:
   "matmul_precision": "high"
 }
 ```
+
+Three defaults changed after comparing against the PatchSAE reference
+implementation (`github.com/dynamical-inference/patchsae`). See
+"Sparsity calibration" below for why.
+
+| argument | old | new |
+| --- | --- | --- |
+| `--l1-reg` | 3e-5 | **2.4e-3** |
+| `--lr` | 1e-4 | **4e-4** |
+| `--lr-warmup-steps` | (none) | **500** |
+| `--bias-init-geom-max-iter` | 100 | **10** |
 
 ```bash
 conda run -n feature_reliance_cu126 python reservoir_sae/experiments/train_vit_sae_descriptor.py \
@@ -282,6 +295,57 @@ conda run -n feature_reliance_cu126 python reservoir_sae/experiments/train_vit_s
   --max-val-tokens 200000 \
   --epochs 350
 ```
+
+### Sparsity calibration
+
+PatchSAE reports L0 as the plain nonzero count (`z > 0`). The SAE that this
+repo shipped had `l0_raw` around 9,900 out of 24,576 latents, i.e. 40 percent of
+the dictionary fires on every token, against roughly 150 for the comparable
+PatchSAE configuration. The `mean_l0` that this pipeline used to report counts
+only `z > active_threshold (0.2)`, which read as 30 for the same checkpoint and
+hid the problem.
+
+The L1 coefficient is the main lever, and the two codebases are not on the same
+scale. PatchSAE divides the reconstruction term by the per-token `||x||2`:
+
+```python
+# src/sae_training/sparse_autoencoder.py
+mse_loss = torch.pow((sae_out - x.float()), 2) / (x**2).sum(dim=-1, keepdim=True).sqrt()
+```
+
+That makes their loss balance invariant to activation scale, so their `8e-5`
+transfers across setups as is. This repo uses `F.mse_loss` (no such division),
+where the reconstruction term grows as the square of the activation scale while
+the L1 term grows linearly. The equivalent coefficient therefore has to be
+multiplied by the activation norm:
+
+```
+l1_reg = ||x - b_dec||2 * 8e-5 = 30.25 * 8e-5 = 2.4e-3
+```
+
+`30.25` is measured on this pipeline's normalized tokens. The conversion carries
+uncertainty because PatchSAE does not normalize its inputs at all, so sweep
+around the value rather than trusting a single point:
+
+```bash
+for L1 in 1.2e-3 2.4e-3 4.8e-3; do
+  conda run -n feature_reliance_cu126 python -u reservoir_sae/experiments/train_vit_sae_descriptor.py \
+    --cache-dir data/hf_cache \
+    --offline \
+    --l1-reg $L1 \
+    --output outputs/reservoir_sae/sweep_l1_$L1.pt \
+    --max-samples 8192 \
+    --max-train-tokens 1000000 \
+    --max-val-tokens 200000 \
+    --num-workers 12 \
+    --epochs 120
+done
+```
+
+Read `l0_raw` (not `mean_l0`) out of the emitted `.json` sidecar to pick a run.
+Raising `l1_reg` roughly 80x is aggressive, so also check that `val_nmse` and the
+dead-latent fraction stay usable; the useful operating point is the L0/FVU
+tradeoff, not the lowest L0.
 
 Package an existing `SAE_validation` checkpoint for routing. This recomputes
 the ViT token normalizer from `data/hf_cache`, then stores it with the existing

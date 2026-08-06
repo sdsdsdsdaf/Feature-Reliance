@@ -1,5 +1,6 @@
 import copy
 import csv
+import json
 from datetime import timedelta
 import itertools
 import os
@@ -16,6 +17,7 @@ from torch.utils.data import DataLoader
 from torchvision.datasets import Imagenette
 
 from Utils.Config import SAEExperimentConfig
+from Utils.datasets import build_dataset
 from Utils.early_stopping import unwrap_compiled_model
 from Utils.SAE_plot_utils import (
     _plot_overlay,
@@ -50,6 +52,10 @@ OUTPUT_ROOT = "outputs/SAE_validation"
 GRID_DIR_NAME = "grid_search"
 
 # Dataset / backbone
+# "imagenet" = HF 캐시(data/hf_cache)의 ImageNet-1k, 1000 클래스. PatchSAE와 같은 학습 분포다.
+# "imagenette" = 10 클래스 서브셋(이전 기본값). 라벨 매핑이 달라지므로 intervention 쪽
+# (Utils.SAE_plot_utils.imagenet_label_map_for)이 이 값을 보고 분기한다.
+DATASET_TYPE = "imagenet"
 DATA_ROOT = "data"
 TRAIN_SPLIT = "train"
 VAL_SPLIT = "val"
@@ -60,23 +66,46 @@ TOKEN_SCOPE = "all"  # "cls", "patch", "all"
 
 # Dataloader / token extraction
 DATALOADER_BATCH_SIZE = 64
-DATALOADER_NUM_WORKERS = 0
+DATALOADER_NUM_WORKERS = 12
 DATALOADER_PIN_MEMORY = True
 MAX_TRAIN_TOKENS = 1_000_000
-MAX_VAL_TOKENS = None
+# ImageNet-1k val은 5만 장(= 약 980만 토큰)이라 None으로 두면 검증 토큰 캐시가 15 GB를 넘는다.
+# imagenette val 전체(약 77만 토큰)와 같은 자릿수로 맞춰 상한을 둔다.
+MAX_VAL_TOKENS = 800_000
+# 정규화 통계 / b_dec 초기화용 상한. 학습 예산과 분리한다 — 통계적으로는 부분표본이면
+# 충분한데, b_dec는 Weiszfeld 반복마다 ViT 전체 패스를 다시 돌아서 여기가 커지면
+# 준비 단계가 학습보다 오래 걸린다. None이면 MAX_TRAIN_TOKENS를 따른다.
+MAX_NORMALIZER_TOKENS = 2_000_000
+MAX_BDEC_TOKENS = 500_000
 TOKEN_SOURCE_MODE = "auto"  # "auto", "cache", "stream"
 TOKEN_CACHE_DTYPE = "float16"
 TOKEN_CACHE_MAX_CPU_GIB = 8.0
 
 # SAE training
-EPOCHS = 350
-SAE_LR = 1e-4
+# TRAIN_SCHEDULE_MODE:
+#   "epoch"        — 고정 토큰 집합을 EPOCHS번 반복. 같은 활성을 반복해서 쓴다.
+#   "token_budget" — 스트림을 한 번만 흘리며 TOTAL_TRAIN_TOKENS를 채운다. 활성을 한 번만
+#                    쓰므로 ViT forward가 토큰당 1회이고 RAM 상한이 없다. 검증은 epoch이
+#                    아니라 EVAL_EVERY_STEPS 스텝마다. PatchSAE 참조 구현과 같은 형태다.
+#                    이 모드에서는 EPOCHS와 MAX_TRAIN_TOKENS를 안 쓴다.
+TRAIN_SCHEDULE_MODE = "token_budget"  # "epoch", "token_budget"
+TOTAL_TRAIN_TOKENS = 502_217_464
+EVAL_EVERY_STEPS = 200
+EPOCHS = 120
+# PatchSAE 참조 구현 기본값(lr 4e-4 + constant-with-warmup 500 step). 이전 값은 1e-4 / warmup 없음.
+SAE_LR = 4e-4
+SAE_LR_WARMUP_STEPS = 500
 SAE_WEIGHT_DECAY = 0.0
 EXPANSION = 64
 B_DEC_INIT_MODE = "geom"  # "zero", "mean", "geom"
 B_DEC_INIT_GRID = [B_DEC_INIT_MODE]  # Set multiple modes here for grid search.
+# Weiszfeld 반복 1회마다 ViT forward 전체 패스가 다시 돈다. 학습보다 이 초기화가 더
+# 오래 걸리지 않도록 낮게 잡는다 (b_dec는 학습되는 파라미터라 초기값일 뿐이다).
+B_DEC_INIT_GEOM_MAX_ITER = 10
 SAE_ACTIVE_THRESHOLD = 0.2
-L1_REG = 1e-4
+# 우리 재구성 항은 F.mse_loss(원소 평균)라 PatchSAE의 ||x||2 나누기 규약과 달리 활성 스케일에
+# 의존한다. PatchSAE의 8e-5를 우리 규약으로 환산: ||x - b_dec||2 실측 30.25 x 8e-5 = 2.4e-3.
+L1_REG = 2.4e-3
 SAE_BATCH_SIZE = 7096
 MODEL_COMPILE = True
 
@@ -96,13 +125,35 @@ RUN_GRID_SEARCH = True
 GRID_MAX_TRIALS = None
 GRID_METRIC = "val_nmse"
 GRID_MODE = "min"
+# best 선정에 거는 희소성 제약. 학습 손실(L1)은 그대로고 "무엇을 남길지"만 바꾼다.
+# 근거: PatchSAE(ICLR2025) Table 2의 B/16 + all tokens + layer11 + expansion64
+# + lambda_l1 8e-5 실측 L0=148.56. metric은 z>0 기준이어야 한다 — active_threshold
+# 초과 개수(mean_l0)로 재면 활성 크기만 작아진 dense SAE가 그대로 통과한다.
+# None으로 두면 제약이 꺼지고 기존 동작(val_nmse 단독 선정)으로 돌아간다.
+SPARSITY_L0_METRIC = "l0_raw"
+SPARSITY_L0_MAX = 150.0
+# l1_reg 3점 스윕. 나머지 축은 상단 노브 값(expansion 64, lr 4e-4, threshold 0.2)으로 고정한다.
+# active_threshold는 학습 손실에 안 들어가고 mean_l0 계산에만 쓰이므로 grid 축으로 두면
+# 같은 학습을 값만 바꿔 두 번 돌리게 된다 — 그래서 뺐다.
 GRID_SPACE = {
+    "sae.l1_reg": [1.2e-3, 2.4e-3, 4.8e-3],
+}
+_UNUSED_GRID_SPACE_FULL = {
     "sae.expansion": [16, 32, 64],
     "sae.l1_reg": [3e-5, 1e-4, 3e-4],
     "optim_config.lr": [5e-5, 1e-4],
     "sae.dec_bias_mode": B_DEC_INIT_GRID,
     "sae.active_threshold": [0.1, 0.2],
 }
+
+# Perturbation 랭킹 / latent intervention 곡선
+# 두 단계는 val의 같은 부분집합을 쓴다 — 여기서 고른 cue latent를 같은 이미지에서 검증한다.
+# 예전에는 오버레이 그림용 12장에 묶여 있어서 acc_drop 분해능이 1/12(0.083)였고 cue와
+# random의 차이가 이미지 한 장 단위로만 나왔다. None이면 val 전체(5만 장)를 쓰는데,
+# 비용이 (spec 15 x alpha 7) x 이미지 수에 선형이라 trial당 수 시간이 된다.
+INTERVENTION_EVAL_IMAGES = 2000
+INTERVENTION_EVAL_BATCH_SIZE = 64
+PERTURBATION_RANKING_BATCH_SIZE = 8
 
 # Latent masking / feature-alignment validation
 RUN_LATENT_MASKING_ALIGNMENT = True
@@ -125,10 +176,13 @@ def build_default_config():
     config.output.root_dir = OUTPUT_ROOT
     config.output.grid_dir_name = GRID_DIR_NAME
 
-    config.train_dataset_spec.root = DATA_ROOT
-    config.train_dataset_spec.split = TRAIN_SPLIT
-    config.val_dataset_spec.root = DATA_ROOT
-    config.val_dataset_spec.split = VAL_SPLIT
+    num_classes = 1000 if DATASET_TYPE == "imagenet" else 10
+    for spec, split in ((config.train_dataset_spec, TRAIN_SPLIT), (config.val_dataset_spec, VAL_SPLIT)):
+        spec.name = f"{DATASET_TYPE}_{split}"
+        spec.dataset_type = DATASET_TYPE
+        spec.root = DATA_ROOT
+        spec.split = split
+        spec.num_classes = num_classes
 
     if config.model_spec is not None:
         config.model_spec.model_name = MODEL_NAME
@@ -142,17 +196,25 @@ def build_default_config():
     config.data_config.pin_memory = DATALOADER_PIN_MEMORY
     config.token.max_train_tokens = MAX_TRAIN_TOKENS
     config.token.max_val_tokens = MAX_VAL_TOKENS
+    config.token.max_normalizer_tokens = MAX_NORMALIZER_TOKENS
+    config.token.max_bdec_tokens = MAX_BDEC_TOKENS
+
+    config.schedule.mode = TRAIN_SCHEDULE_MODE
+    config.schedule.total_train_tokens = TOTAL_TRAIN_TOKENS
+    config.schedule.eval_every_steps = EVAL_EVERY_STEPS
     config.token.source_mode = TOKEN_SOURCE_MODE
     config.token.cache_dtype = TOKEN_CACHE_DTYPE
     config.token.cache_max_cpu_gib = TOKEN_CACHE_MAX_CPU_GIB
 
     config.optim_config.epochs = EPOCHS
     config.optim_config.lr = SAE_LR
+    config.optim_config.lr_warmup_steps = SAE_LR_WARMUP_STEPS
     config.optim_config.weight_decay = SAE_WEIGHT_DECAY
     config.optim_config.use_amp = USE_AMP
 
     config.sae.expansion = EXPANSION
     config.sae.dec_bias_mode = B_DEC_INIT_MODE
+    config.sae.bias_init_geom_max_iter = B_DEC_INIT_GEOM_MAX_ITER
     config.sae.active_threshold = SAE_ACTIVE_THRESHOLD
     config.sae.l1_reg = L1_REG
     config.sae.batch_size = SAE_BATCH_SIZE
@@ -170,6 +232,13 @@ def build_default_config():
     config.grid.metric = GRID_METRIC
     config.grid.mode = GRID_MODE
     config.grid.space = GRID_SPACE
+
+    config.sparsity.metric = SPARSITY_L0_METRIC
+    config.sparsity.l0_max = SPARSITY_L0_MAX
+
+    config.diagnostics.eval_images = INTERVENTION_EVAL_IMAGES
+    config.diagnostics.eval_batch_size = INTERVENTION_EVAL_BATCH_SIZE
+    config.diagnostics.ranking_batch_size = PERTURBATION_RANKING_BATCH_SIZE
 
     config.validate()
     if config.extraction_config.device == "cuda" and not torch.cuda.is_available():
@@ -194,20 +263,30 @@ def build_backbone_and_transform(config: SAEExperimentConfig):
     return model, transform, mean, std
 
 
-def build_imagenette_dataset(dataset_spec, transform):
-    if dataset_spec.dataset_type != "imagenette":
-        raise ValueError(f"SAE_validation currently supports dataset_type='imagenette', got {dataset_spec.dataset_type!r}.")
-    dataset = Imagenette(
-        root=dataset_spec.root or "data",
-        split=dataset_spec.split,
-        download=False,
-    )
+def build_sae_dataset(dataset_spec, transform):
+    """dataset_spec 하나로 imagenette / ImageNet-1k 를 같은 인터페이스로 연다.
+
+    ImageNet-1k는 HF 캐시(data/hf_cache)에서 읽는다. transform은 두 경우 모두
+    TransformDataset이 씌운다 — HF 로더가 주는 np.ndarray는 거기서 PIL로 맞춘다."""
+    kind = str(dataset_spec.dataset_type).lower()
+    if kind == "imagenette":
+        dataset = Imagenette(
+            root=dataset_spec.root or "data",
+            split=dataset_spec.split,
+            download=False,
+        )
+    elif kind == "imagenet":
+        dataset, _meta = build_dataset("imagenet", split=dataset_spec.split, root=dataset_spec.root or "data")
+    else:
+        raise ValueError(
+            f"SAE_validation supports dataset_type in {{'imagenette', 'imagenet'}}, got {dataset_spec.dataset_type!r}."
+        )
     return TransformDataset(dataset, transform=transform)
 
 
 def build_train_val_loaders(config, transform):
-    train_dataset = build_imagenette_dataset(config.train_dataset_spec, transform)
-    val_dataset = build_imagenette_dataset(config.val_dataset_spec, transform)
+    train_dataset = build_sae_dataset(config.train_dataset_spec, transform)
+    val_dataset = build_sae_dataset(config.val_dataset_spec, transform)
     pin_memory = bool(config.data_config.pin_memory and str(config.extraction_config.device).startswith("cuda"))
 
     train_loader = DataLoader(
@@ -227,7 +306,20 @@ def build_train_val_loaders(config, transform):
     return train_dataset, val_dataset, train_loader, val_loader
 
 
-def print_config_summary(config):
+def tokens_per_image_for_scope(token_scope, grid=14):
+    """token_scope별 이미지 1장당 토큰 수. cls=1, patch=grid^2, all=grid^2+1."""
+    scope = str(token_scope).lower()
+    if scope == "cls":
+        return 1
+    if scope == "patch":
+        return grid * grid
+    return grid * grid + 1
+
+
+def print_config_summary(config, train_dataset=None):
+    """실행 설정 요약. schedule.mode에 따라 학습량 관련 줄만 다르게 찍는다 —
+    쓰이지 않는 값(예: token_budget 모드의 epochs/max_train_tokens)을 같이 찍으면
+    무엇이 실제로 학습량을 정하는지 오해하게 된다."""
     print("\nSAE experiment config")
     print("=" * 32)
     print(f"model_name             : {MODEL_NAME}")
@@ -235,19 +327,45 @@ def print_config_summary(config):
     print(f"device                 : {config.extraction_config.device}")
     print(f"target_block           : {config.hook.target_block}")
     print(f"token_scope            : {config.hook.token_scope}")
-    print(f"max_train_tokens       : {config.token.max_train_tokens}")
     print(f"max_val_tokens         : {config.token.max_val_tokens}")
-    print(f"token_source_mode      : {config.token.source_mode}")
     print(f"expansion              : {config.sae.expansion}")
     print(f"dec_bias_mode          : {config.sae.dec_bias_mode}")
     print(f"active_threshold       : {config.sae.active_threshold}")
-    print(f"epochs                 : {config.optim_config.epochs}")
     print(f"lr                     : {config.optim_config.lr}")
+    print(f"lr_warmup_steps        : {config.optim_config.lr_warmup_steps}")
     print(f"l1_reg                 : {config.sae.l1_reg}")
     print(f"sae_batch_size         : {config.sae.batch_size}")
     print(f"use_amp                : {config.optim_config.use_amp}")
     print(f"amp_dtype              : {config.sae.amp_dtype}")
     print(f"early_stop_patience    : {config.early_stopping.patience}")
+
+    print("-" * 32)
+    mode = str(config.schedule.mode).lower()
+    print(f"schedule_mode          : {mode}")
+    if mode == "token_budget":
+        budget = int(config.schedule.total_train_tokens or 0)
+        tpi = tokens_per_image_for_scope(config.hook.token_scope)
+        print(f"total_train_tokens     : {budget:,}")
+        print(f"eval_every_steps       : {config.schedule.eval_every_steps}")
+        print(f"→ SAE steps            : {budget // max(1, config.sae.batch_size):,}")
+        print(f"→ evaluations          : {budget // max(1, config.sae.batch_size) // max(1, config.schedule.eval_every_steps):,}")
+        if train_dataset is not None:
+            n_img = len(train_dataset)
+            per_epoch = n_img * tpi
+            print(f"→ train set            : {n_img:,} images x {tpi} tokens = {per_epoch:,} tokens / epoch")
+            print(f"→ epochs equivalent    : {budget / max(1, per_epoch):.3f}")
+            print(f"→ images processed     : {budget // max(1, tpi):,}")
+        print("  (epochs / max_train_tokens / token_source_mode 는 이 모드에서 쓰이지 않는다)")
+    else:
+        print(f"epochs                 : {config.optim_config.epochs}")
+        print(f"max_train_tokens       : {config.token.max_train_tokens}")
+        print(f"token_source_mode      : {config.token.source_mode}")
+        if train_dataset is not None and config.token.max_train_tokens:
+            tpi = tokens_per_image_for_scope(config.hook.token_scope)
+            used = int(config.token.max_train_tokens) // tpi
+            print(f"→ unique images used   : {used:,} / {len(train_dataset):,} "
+                  f"({100.0 * used / max(1, len(train_dataset)):.2f}% of train set), reused every epoch")
+        print("  (total_train_tokens / eval_every_steps 는 이 모드에서 쓰이지 않는다)")
 
 
 def run_sae_trial(config, trial_dir, trial_id=None):
@@ -255,20 +373,27 @@ def run_sae_trial(config, trial_dir, trial_id=None):
     trial_dir = Path(trial_dir)
     trial_dir.mkdir(parents=True, exist_ok=True)
     save_json(trial_dir / "config.json", config)
-    print_config_summary(config)
 
     torch.set_float32_matmul_precision(config.sae.matmul_precision)
     model, transform, mean, std = build_backbone_and_transform(config)
     train_dataset, val_dataset, train_loader, val_loader = build_train_val_loaders(config, transform)
 
+    # 데이터셋을 만든 뒤에 찍는다 — 학습량을 epoch 환산으로 보여주려면 train set 크기가 필요하다.
+    print_config_summary(config, train_dataset=train_dataset)
+
     describe_dataset("train_dataset", train_dataset)
     describe_dataset("val_dataset", val_dataset)
+
+    # 준비 단계는 학습 예산과 분리한다. 특히 b_dec의 Weiszfeld 반복은 반복마다 ViT
+    # 전체 패스를 다시 도므로, 학습 토큰이 커질 때 같이 커지면 학습보다 비싸진다.
+    normalizer_tokens = config.token.max_normalizer_tokens or config.token.max_train_tokens
+    bdec_tokens = config.token.max_bdec_tokens or config.token.max_train_tokens
 
     print("\nFitting train-token normalizer from streaming train tokens...")
     token_stats, train_token_count = fit_token_normalizer_streaming(
         model,
         train_loader,
-        max_tokens=config.token.max_train_tokens,
+        max_tokens=normalizer_tokens,
         target_block=config.hook.target_block,
         token_scope=config.hook.token_scope,
         device=config.extraction_config.device,
@@ -280,7 +405,7 @@ def run_sae_trial(config, trial_dir, trial_id=None):
         model,
         train_loader,
         token_stats,
-        max_tokens=config.token.max_train_tokens,
+        max_tokens=bdec_tokens,
         target_block=config.hook.target_block,
         token_scope=config.hook.token_scope,
         device=config.extraction_config.device,
@@ -316,7 +441,11 @@ def run_sae_trial(config, trial_dir, trial_id=None):
         b_dec_init,
         config,
         checkpoint_path=checkpoint_path,
-        expected_tokens=train_token_count,
+        # 학습 1 epoch이 소비할 토큰 수여야 한다. train_token_count는 정규화 통계가 본
+        # 토큰 수라 max_normalizer_tokens를 따로 키우면 여기가 같이 커지고, 그러면
+        # cache/stream 판정과 진행 바 총량이 둘 다 어긋난다(cache로 들어갈 크기인데
+        # stream을 골라 epoch마다 ViT 전체 패스를 다시 돈다).
+        expected_tokens=config.token.max_train_tokens,
     )
 
     validation_metrics = evaluate_sae_tokens(
@@ -374,6 +503,9 @@ def run_sae_trial(config, trial_dir, trial_id=None):
         "best_epoch": best_row.get("epoch"),
         "best_val_nmse": best_row.get("normalized_mse"),
         "best_active_mean_count": best_row.get("active_mean_count"),
+        "best_l0_raw": best_row.get("l0_raw"),
+        "best_l0_feasible": best_row.get("l0_feasible"),
+        "sparsity_constraint": {"metric": config.sparsity.metric, "max": config.sparsity.l0_max},
         "final_validation_metrics": validation_metrics,
         "latent_masking_alignment": latent_masking_alignment,
         "latent_overlay_visualizations": latent_overlay_visualizations,
@@ -782,12 +914,72 @@ def run_latent_overlay_visualizations(
     return summary
 
 
-def select_best_trial(summaries, metric, mode):
+def select_best_trial(summaries, metric, mode, l0_metric=None, l0_max=None):
+    """완료된 trial 중 best를 고른다.
+
+    l0_max가 주어지면 그 제약을 만족하는 trial만 후보다. 후보가 하나도 없으면 임의로
+    하나를 고르지 않고 `selected=None`과 함께 왜 못 골랐는지를 담아 돌려준다 —
+    dense한 SAE가 조용히 best로 승격되는 걸 막는 게 이 함수의 요점이다.
+
+    반환: {"selected": <trial row | None>, "selection": {...판정 근거...}} 또는
+    완료된 trial이 아예 없으면 None."""
     completed = [row for row in summaries if row.get("status") == "completed" and row.get(metric) is not None]
     if not completed:
         return None
     reverse = mode == "max"
-    return sorted(completed, key=lambda row: row[metric], reverse=reverse)[0]
+    ranked = sorted(completed, key=lambda row: row[metric], reverse=reverse)
+
+    if l0_max is None:
+        return {
+            "selected": ranked[0],
+            "selection": {"constraint": None, "total_trials": len(completed)},
+        }
+
+    scored = [row for row in completed if row.get(l0_metric) is not None]
+    feasible = [row for row in ranked if row.get(l0_metric) is not None and float(row[l0_metric]) <= float(l0_max)]
+    closest = min(scored, key=lambda row: float(row[l0_metric])) if scored else None
+    selection = {
+        "constraint": {"metric": l0_metric, "max": float(l0_max)},
+        "total_trials": len(completed),
+        "scored_trials": len(scored),
+        "feasible_trials": len(feasible),
+        "closest_trial": (closest or {}).get("trial_id"),
+        "closest_l0": None if closest is None else float(closest[l0_metric]),
+    }
+    if feasible:
+        return {"selected": feasible[0], "selection": {**selection, "feasible": True}}
+    return {
+        "selected": None,
+        "selection": {
+            **selection,
+            "feasible": False,
+            "reason": f"{l0_metric} <= {l0_max} 를 만족하는 trial이 없다",
+        },
+    }
+
+
+def _grid_row_from_summary(trial_id, trial_dir, overrides, summary):
+    """trial summary.json 하나를 grid_summary 행으로 정규화한다.
+
+    새로 학습한 trial과 이미 있는 trial 디렉터리를 재사용할 때가 같은 스키마를 쓰도록
+    한 곳에 모아둔다(재실행 시 선정만 다시 돌릴 수 있어야 한다)."""
+    metrics = summary.get("final_validation_metrics") or {}
+    return {
+        "trial_id": trial_id,
+        "status": "completed",
+        "trial_dir": str(trial_dir),
+        "val_nmse": metrics.get("normalized_mse"),
+        "cosine": metrics.get("cosine"),
+        "mean_l0": metrics.get("mean_l0"),
+        "l0_raw": metrics.get("l0_raw"),
+        "l0_ratio_raw": metrics.get("l0_ratio_raw"),
+        "best_epoch": summary.get("best_epoch"),
+        "best_val_nmse": summary.get("best_val_nmse"),
+        "best_active_mean_count": summary.get("best_active_mean_count"),
+        "best_l0_raw": summary.get("best_l0_raw"),
+        "l0_feasible": summary.get("best_l0_feasible"),
+        "overrides": overrides,
+    }
 
 
 def run_sae_grid_search(base_config: SAEExperimentConfig):
@@ -802,13 +994,29 @@ def run_sae_grid_search(base_config: SAEExperimentConfig):
 
     total_trials = len(grid_items)
     for trial_idx, overrides in enumerate(grid_items):
-        trial_dir = root_dir / f"trial_{trial_idx:04d}"
+        trial_id = f"trial_{trial_idx:04d}"
+        trial_dir = root_dir / trial_id
         if trial_dir.exists():
-            print(f"Trial {trial_idx + 1}/{total_trials} already exists, skipping...")
-            continue
+            # 완료된 trial만 재사용한다. 예전에는 디렉터리가 있으면 무조건 continue라
+            # trial_summaries가 비었고 best_trial.json이 null로 덮였다.
+            existing = trial_dir / "summary.json"
+            done_summary = None
+            if existing.exists():
+                try:
+                    candidate = json.loads(existing.read_text(encoding="utf-8"))
+                except json.JSONDecodeError:
+                    candidate = None
+                if candidate is not None and candidate.get("status") == "completed":
+                    done_summary = candidate
+            if done_summary is not None:
+                trial_summaries.append(_grid_row_from_summary(trial_id, trial_dir, overrides, done_summary))
+                print(f"Trial {trial_idx + 1}/{total_trials} already exists, reusing summary.json")
+                continue
+            # 중단되거나 실패한 trial이다. 건너뛰면 그 조합은 영원히 학습되지 않으므로
+            # 다시 돌린다(run_sae_trial이 같은 디렉터리에 덮어쓴다).
+            print(f"Trial {trial_idx + 1}/{total_trials} exists but is incomplete; retraining.")
 
         trial_start_time = time.perf_counter()
-        trial_id = f"trial_{trial_idx:04d}"
         trial_dir = root_dir / trial_id
         print(f"\n[{trial_idx + 1}/{total_trials} trial] tuning HP: {format_tuning_hp(overrides)}")
         print(f"===== {trial_id} =====")
@@ -816,18 +1024,7 @@ def run_sae_grid_search(base_config: SAEExperimentConfig):
 
         try:
             summary = run_sae_trial(config, trial_dir=trial_dir, trial_id=trial_id)
-            row = {
-                "trial_id": trial_id,
-                "status": "completed",
-                "trial_dir": str(trial_dir),
-                "val_nmse": summary["final_validation_metrics"]["normalized_mse"],
-                "cosine": summary["final_validation_metrics"]["cosine"],
-                "mean_l0": summary["final_validation_metrics"]["mean_l0"],
-                "best_epoch": summary.get("best_epoch"),
-                "best_val_nmse": summary.get("best_val_nmse"),
-                "best_active_mean_count": summary.get("best_active_mean_count"),
-                "overrides": overrides,
-            }
+            row = _grid_row_from_summary(trial_id, trial_dir, overrides, summary)
         except Exception as exc:
             error_text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
             trial_dir.mkdir(parents=True, exist_ok=True)
@@ -848,9 +1045,13 @@ def run_sae_grid_search(base_config: SAEExperimentConfig):
                 "val_nmse": None,
                 "cosine": None,
                 "mean_l0": None,
+                "l0_raw": None,
+                "l0_ratio_raw": None,
                 "best_epoch": None,
                 "best_val_nmse": None,
                 "best_active_mean_count": None,
+                "best_l0_raw": None,
+                "l0_feasible": None,
                 "overrides": overrides,
                 "error": f"{type(exc).__name__}: {exc}",
             }
@@ -863,9 +1064,20 @@ def run_sae_grid_search(base_config: SAEExperimentConfig):
         elapsed_str = str(timedelta(seconds=int(elapsed_time)))
         print(f"Trial {trial_id} completed in {elapsed_str}.")
 
-    best = select_best_trial(trial_summaries, metric=base_config.grid.metric, mode=base_config.grid.mode)
+    best = select_best_trial(
+        trial_summaries,
+        metric=base_config.grid.metric,
+        mode=base_config.grid.mode,
+        l0_metric=base_config.sparsity.metric,
+        l0_max=base_config.sparsity.l0_max,
+    )
     save_json(root_dir / "best_trial.json", best)
-    print(f"\nBest trial: {best}")
+    if best is None:
+        print("\n[WARN] 완료된 trial이 하나도 없어 best를 고르지 못했다.")
+    elif best.get("selection", {}).get("feasible") is False:
+        print(f"\n[WARN] 희소성 제약을 만족하는 trial이 없다: {jsonable(best['selection'])}")
+    else:
+        print(f"\nBest trial: {jsonable(best)}")
     return trial_summaries, best
 
 

@@ -169,6 +169,18 @@ class _HFImageNetDataset(Dataset):
     def __init__(self, hf_dataset, transform: Optional[Callable] = None):
         self.ds = hf_dataset
         self.transform = transform
+        self._label_cache: Optional[list[int]] = None
+
+    @property
+    def _labels(self) -> list[int]:
+        """전체 라벨 리스트. Arrow 컬럼만 읽어서 이미지 디코드를 피한다.
+
+        이게 없으면 라벨이 필요한 쪽(예: Utils.SAE_plot_utils._dataset_labels)이
+        `[ds[i][1] for i in range(len(ds))]`로 떨어져 전체 이미지를 디코드한다 —
+        ImageNet 규모에서는 사실상 끝나지 않는다."""
+        if self._label_cache is None:
+            self._label_cache = [int(v) for v in self.ds["label"]]
+        return self._label_cache
 
     def __len__(self) -> int:
         """전체 샘플 수."""

@@ -13,6 +13,7 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from PIL import Image
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, TensorDataset
 from tqdm.auto import tqdm
@@ -37,10 +38,15 @@ class TransformDataset(Dataset):
         return len(self.dataset)
 
     def __getitem__(self, idx):
-        x, y = self.dataset[idx]
+        item = self.dataset[idx]
+        x, y = item[0], item[1]
         if self.transform is not None:
+            # HF ImageNet 로더는 np.ndarray를 준다. timm transform은 PIL/Tensor만 받으므로
+            # 여기서 맞춘다 (imagenette는 이미 PIL이라 그대로 통과).
+            if isinstance(x, np.ndarray):
+                x = Image.fromarray(x)
             x = self.transform(x)
-        return x, y
+        return x, int(y)
 
 
 def get_torch_dtype(dtype):
@@ -338,7 +344,7 @@ def _assert_finite_grads(model):
             raise FloatingPointError(f"Non-finite gradient detected in {name}.")
 
 
-def _run_sae_step(sae, optimizer, xb, scaler, sae_config, optim_config, device):
+def _run_sae_step(sae, optimizer, xb, scaler, sae_config, optim_config, device, scheduler=None):
     amp_dtype = get_torch_dtype(sae_config.amp_dtype)
     amp_enabled = _amp_enabled(device, optim_config.use_amp)
     autocast_device = "cuda" if str(device).startswith("cuda") else "cpu"
@@ -370,6 +376,8 @@ def _run_sae_step(sae, optimizer, xb, scaler, sae_config, optim_config, device):
         scaler.update()
     else:
         optimizer.step()
+    if scheduler is not None:
+        scheduler.step()
     unwrap_compiled_model(sae).set_decoder_norm_to_unit_norm()
     return loss, recon_loss, l1_loss, x_hat, z
 
@@ -482,6 +490,155 @@ def _make_optimizer(sae, optim_config):
     return torch.optim.AdamW(sae.parameters(), lr=float(optim_config.lr), weight_decay=float(optim_config.weight_decay))
 
 
+def _make_scheduler(optimizer, optim_config):
+    """constant-with-warmup 스케줄러. warmup 구간에서 lr을 선형으로 올리고 이후 고정한다.
+
+    PatchSAE 참조 구현의 'constantwithwarmup'과 같은 식이다
+    (`min(1.0, (step + 1) / warmup_steps)`). lr_warmup_steps가 0이면 None을 돌려
+    스케줄러 없이 기존 동작을 유지한다."""
+    warmup_steps = int(getattr(optim_config, "lr_warmup_steps", 0) or 0)
+    if warmup_steps <= 0:
+        return None
+    return torch.optim.lr_scheduler.LambdaLR(
+        optimizer, lr_lambda=lambda step: min(1.0, (step + 1) / warmup_steps)
+    )
+
+
+def _build_eval_row(sae, val_tokens, hidden_dim, eval_index, step, tokens_seen, train_loss_sum, train_mse_sum, train_l1_sum, train_rows, elapsed, config):
+    """스텝 기준 검증 결과 한 줄. epoch 모드의 row와 같은 스키마를 유지한다.
+
+    `epoch` 키에는 검증 회차를 넣는다 — EarlyStopper와 plot_sae_training_history가
+    그 키를 x축/식별자로 쓰고 있어서 이름을 바꾸면 둘 다 깨진다. 실제 진행도는
+    step/tokens_seen에 따로 담는다."""
+    row = _build_epoch_row(
+        sae, val_tokens, hidden_dim, eval_index,
+        train_loss_sum, train_mse_sum, train_l1_sum, train_rows, elapsed, config,
+    )
+    row["step"] = int(step)
+    row["tokens_seen"] = int(tokens_seen)
+    return row
+
+
+def train_sae_token_budget(
+    model,
+    loader,
+    val_tokens,
+    token_stats,
+    input_dim,
+    hidden_dim,
+    b_dec_init,
+    config,
+    checkpoint_path,
+):
+    """스트림을 한 번만 흘리며 total_train_tokens를 채울 때까지 학습한다.
+
+    같은 활성을 두 번 쓰지 않는다 — 배치를 뽑아 SGD 한 스텝 하고 버린다. 그래서
+    ViT forward가 토큰당 정확히 1회이고(에폭 반복으로 인한 재계산 없음) 활성을
+    보관하지 않으므로 RAM 상한도 없다. 검증은 epoch이 아니라 eval_every_steps마다 한다.
+
+    예산이 데이터셋 한 바퀴보다 크면 loader를 다시 돈다."""
+    device = config.extraction_config.device
+    budget = config.schedule.total_train_tokens
+    if budget is None:
+        raise ValueError("schedule.mode='token_budget'이면 schedule.total_train_tokens가 필요하다.")
+    budget = int(budget)
+    eval_every = max(1, int(config.schedule.eval_every_steps))
+
+    sae = _compile_sae_if_needed(_new_sae(input_dim, hidden_dim, b_dec_init, config, device), config.sae)
+    optimizer = _make_optimizer(sae, config.optim_config)
+    scaler = _make_grad_scaler(device, config.optim_config.use_amp, get_torch_dtype(config.sae.amp_dtype))
+    scheduler = _make_scheduler(optimizer, config.optim_config)
+    history = []
+    early_stopper = EarlyStopper(
+        patience=config.early_stopping.patience,
+        eps=config.early_stopping.eps,
+        checkpoint_path=checkpoint_path,
+        metric_name=config.early_stopping.metric_name,
+        l0_metric=config.sparsity.metric,
+        l0_max=config.sparsity.l0_max,
+        verbose=config.early_stopping.save_verbose,
+    )
+
+    print(f"SAE token-budget training: {budget:,} tokens, eval every {eval_every} steps")
+    n_tokens = n_steps = eval_index = 0
+    train_loss_sum = train_mse_sum = train_l1_sum = 0.0
+    train_rows = 0
+    window_start = time.perf_counter()
+    carry = None
+    should_stop = done = False
+
+    with tqdm(total=budget, desc="SAE token budget", unit="tok", **TQDM_KW) as pbar:
+        while not done:
+            sae.train()
+            for token_batch in iter_token_batches_with_hook(
+                model, loader, None, config.hook.target_block, config.hook.token_scope, device
+            ):
+                token_batch = normalize_tokens_inplace(token_batch.float(), token_stats)
+                if carry is not None:
+                    token_batch = torch.cat([carry, token_batch], dim=0)
+                    carry = None
+                token_batch = token_batch[torch.randperm(token_batch.shape[0])]
+                full_count = (token_batch.shape[0] // config.sae.batch_size) * config.sae.batch_size
+
+                for start in range(0, full_count, config.sae.batch_size):
+                    xb = token_batch[start : start + config.sae.batch_size].float().to(device)
+                    loss, recon_loss, l1_loss, x_hat, z = _run_sae_step(
+                        sae, optimizer, xb, scaler, config.sae, config.optim_config, device, scheduler
+                    )
+                    train_loss_sum += float(loss.item()) * xb.shape[0]
+                    train_mse_sum += float(recon_loss.item()) * xb.shape[0]
+                    train_l1_sum += float(l1_loss.item()) * xb.shape[0]
+                    train_rows += xb.shape[0]
+                    n_tokens += xb.shape[0]
+                    n_steps += 1
+                    pbar.update(xb.shape[0])
+                    del xb, x_hat, z, loss, recon_loss, l1_loss
+
+                    if n_steps % eval_every == 0 or n_tokens >= budget:
+                        eval_index += 1
+                        row = _build_eval_row(
+                            sae, val_tokens, hidden_dim, eval_index, n_steps, n_tokens,
+                            train_loss_sum, train_mse_sum, train_l1_sum, train_rows,
+                            time.perf_counter() - window_start, config,
+                        )
+                        _, should_stop = early_stopper.step(row["normalized_mse"], sae, row)
+                        history.append(row)
+                        print(format_sae_epoch_log(row, hidden_dim=hidden_dim, threshold=config.sae.active_threshold, patience=config.early_stopping.patience))
+                        train_loss_sum = train_mse_sum = train_l1_sum = 0.0
+                        train_rows = 0
+                        window_start = time.perf_counter()
+                        sae.train()
+
+                    if should_stop or n_tokens >= budget:
+                        done = True
+                        break
+
+                if full_count < token_batch.shape[0]:
+                    carry = token_batch[full_count:].detach().cpu()
+                del token_batch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                if done:
+                    break
+
+            if not done and n_tokens == 0:
+                raise RuntimeError("토큰이 하나도 나오지 않았다 — loader가 비어 있는지 확인할 것.")
+
+    if should_stop:
+        print(
+            f"Early stopping at step {n_steps} ({n_tokens:,} tokens): val_nmse did not improve by at least "
+            f"{config.early_stopping.eps:g} for {early_stopper.bad_epochs} evaluations."
+        )
+
+    best_checkpoint = early_stopper.load_best(sae, map_location=device)
+    print(
+        f"Loaded best SAE checkpoint for downstream validation: "
+        f"eval={best_checkpoint['epoch']}, step={best_checkpoint['row'].get('step')}, "
+        f"val_nmse={best_checkpoint[config.early_stopping.metric_name]:.6f}"
+    )
+    return sae, history
+
+
 def train_sae_streaming(
     model,
     loader,
@@ -498,12 +655,15 @@ def train_sae_streaming(
     sae = _compile_sae_if_needed(_new_sae(input_dim, hidden_dim, b_dec_init, config, device), config.sae)
     optimizer = _make_optimizer(sae, config.optim_config)
     scaler = _make_grad_scaler(device, config.optim_config.use_amp, get_torch_dtype(config.sae.amp_dtype))
+    scheduler = _make_scheduler(optimizer, config.optim_config)
     history = []
     early_stopper = EarlyStopper(
         patience=config.early_stopping.patience,
         eps=config.early_stopping.eps,
         checkpoint_path=checkpoint_path,
         metric_name=config.early_stopping.metric_name,
+        l0_metric=config.sparsity.metric,
+        l0_max=config.sparsity.l0_max,
         verbose=config.early_stopping.save_verbose,
     )
     expected_steps = math.ceil(int(expected_tokens) / config.sae.batch_size) if expected_tokens is not None else None
@@ -541,7 +701,7 @@ def train_sae_streaming(
                 for start in range(0, full_count, config.sae.batch_size):
                     xb = token_batch[start : start + config.sae.batch_size].float().to(device)
                     loss, recon_loss, l1_loss, x_hat, z = _run_sae_step(
-                        sae, optimizer, xb, scaler, config.sae, config.optim_config, device
+                        sae, optimizer, xb, scaler, config.sae, config.optim_config, device, scheduler
                     )
                     train_loss_sum += float(loss.item()) * xb.shape[0]
                     train_mse_sum += float(recon_loss.item()) * xb.shape[0]
@@ -560,7 +720,7 @@ def train_sae_streaming(
             if carry is not None and carry.numel() > 0:
                 xb = carry.float().to(device)
                 loss, recon_loss, l1_loss, x_hat, z = _run_sae_step(
-                    sae, optimizer, xb, scaler, config.sae, config.optim_config, device
+                    sae, optimizer, xb, scaler, config.sae, config.optim_config, device, scheduler
                 )
                 train_loss_sum += float(loss.item()) * xb.shape[0]
                 train_mse_sum += float(recon_loss.item()) * xb.shape[0]
@@ -640,12 +800,15 @@ def train_sae_cached(
     sae = _compile_sae_if_needed(_new_sae(input_dim, hidden_dim, b_dec_init, config, device), config.sae)
     optimizer = _make_optimizer(sae, config.optim_config)
     scaler = _make_grad_scaler(device, config.optim_config.use_amp, get_torch_dtype(config.sae.amp_dtype))
+    scheduler = _make_scheduler(optimizer, config.optim_config)
     history = []
     early_stopper = EarlyStopper(
         patience=config.early_stopping.patience,
         eps=config.early_stopping.eps,
         checkpoint_path=checkpoint_path,
         metric_name=config.early_stopping.metric_name,
+        l0_metric=config.sparsity.metric,
+        l0_max=config.sparsity.l0_max,
         verbose=config.early_stopping.save_verbose,
     )
     print(f"SAE cached train tokens per epoch: {len(train_tokens):,}")
@@ -664,7 +827,7 @@ def train_sae_cached(
         ):
             xb = xb_cpu.to(device, non_blocking=True).float()
             loss, recon_loss, l1_loss, x_hat, z = _run_sae_step(
-                sae, optimizer, xb, scaler, config.sae, config.optim_config, device
+                sae, optimizer, xb, scaler, config.sae, config.optim_config, device, scheduler
             )
             train_loss_sum += float(loss.item()) * xb.shape[0]
             train_mse_sum += float(recon_loss.item()) * xb.shape[0]
@@ -703,6 +866,15 @@ def train_sae_cached(
 
 
 def train_sae_auto(model, loader, val_tokens, token_stats, input_dim, hidden_dim, b_dec_init, config, checkpoint_path, expected_tokens=None):
+    schedule_mode = str(getattr(config, "schedule", None) and config.schedule.mode or "epoch").lower()
+    if schedule_mode == "token_budget":
+        # 단일 통과라 활성을 보관하지 않는다 — cache/stream 선택 자체가 필요 없다.
+        return train_sae_token_budget(
+            model, loader, val_tokens, token_stats, input_dim, hidden_dim, b_dec_init, config, checkpoint_path
+        )
+    if schedule_mode != "epoch":
+        raise ValueError(f"schedule.mode must be 'epoch' or 'token_budget', got {schedule_mode!r}.")
+
     token_count_for_decision = expected_tokens if expected_tokens is not None else config.token.max_train_tokens
     mode = choose_token_source_mode(config.token, token_count_for_decision, input_dim)
     print(f"Token source mode selected: {mode}")
@@ -750,25 +922,35 @@ def _build_epoch_row(sae, val_tokens, hidden_dim, epoch, train_loss_sum, train_m
 @torch.no_grad()
 def evaluate_sae_tokens(sae, tokens_norm, batch_size, threshold, device):
     sae.eval().to(device)
-    total_sse = total_cosine = total_l0 = total_rows = total_elements = 0.0
+    total_sse = total_cosine = total_l0 = total_l0_raw = total_rows = total_elements = 0.0
+    hidden_dim = None
     for start in tqdm(range(0, tokens_norm.shape[0], batch_size), leave=False, desc="Eval", **TQDM_KW):
         xb = tokens_norm[start : start + batch_size].float().to(device, non_blocking=True)
         x_hat, z = sae(xb)
         total_sse += float((xb - x_hat).square().sum().item())
         total_cosine += float(F.cosine_similarity(xb, x_hat, dim=1).sum().item())
         total_l0 += float((z > threshold).sum().item())
+        # ReLU 출력이라 z >= 0 이고, z > 0 은 z != 0 과 같다. count_nonzero는 bool 임시
+        # 텐서를 만들지 않고 바로 리듀스하므로 (z > 0) 대비 검증 피크 VRAM이 늘지 않는다
+        # (hidden 49152, batch 7096이면 그 임시 하나가 0.3 GiB다).
+        total_l0_raw += float(torch.count_nonzero(z).item())
+        if hidden_dim is None:
+            hidden_dim = int(z.shape[-1])
         total_rows += xb.shape[0]
         total_elements += xb.numel()
         del xb, x_hat, z
 
     mse = total_sse / max(1, total_elements)
     variance = float(tokens_norm.float().var(unbiased=False).item())
+    l0_raw = total_l0_raw / max(1, total_rows)
     return {
         "mse": mse,
         "normalized_mse": mse / max(variance, 1e-12),
         "val_nmse": mse / max(variance, 1e-12),
         "cosine": total_cosine / max(1, total_rows),
         "mean_l0": total_l0 / max(1, total_rows),
+        "l0_raw": l0_raw,
+        "l0_ratio_raw": l0_raw / max(1, hidden_dim or 1),
     }
 
 

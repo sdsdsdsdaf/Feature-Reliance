@@ -259,7 +259,11 @@ class OptimConfig:
     head_lr: Optional[float] = None
     weight_decay: float = 1e-4
     use_amp: bool = False
-    activation_function: str = "gelu" 
+    activation_function: str = "gelu"
+    # constant-with-warmup 스텝 수. 0이면 스케줄러를 안 만들고 기존 동작(고정 lr) 그대로다.
+    # PatchSAE 참조 구현(src/sae_training/utils.get_scheduler)의 'constantwithwarmup'과
+    # 같은 형태: lr_scale = min(1.0, (step + 1) / lr_warmup_steps).
+    lr_warmup_steps: int = 0
     
 @dataclass
 class LoggingConfig:
@@ -327,9 +331,31 @@ class SAEBackboneHookConfig:
 
 
 @dataclass
+class SAETrainScheduleConfig:
+    """학습량과 검증 주기를 무엇으로 세는지 정한다.
+
+    mode="epoch"   : 고정 토큰 집합을 epochs번 반복하고 epoch마다 검증한다(기존 동작).
+    mode="token_budget": 스트림을 한 번만 흘리면서 total_train_tokens를 채울 때까지
+                    학습하고, eval_every_steps마다 검증한다. 같은 활성을 두 번 쓰지
+                    않으므로 ViT forward 비용이 토큰 수에 선형이고 RAM 상한이 없다
+                    (PatchSAE 참조 구현 src/sae_training/sae_trainer.py:202와 같은 형태).
+
+    epoch 모드에서는 total_train_tokens / eval_every_steps를 무시한다."""
+
+    mode: str = "epoch"  # "epoch" | "token_budget"
+    total_train_tokens: Optional[int] = None
+    eval_every_steps: int = 200
+
+
+@dataclass
 class SAETokenConfig:
     max_train_tokens: Optional[int] = 1_000_000
     max_val_tokens: Optional[int] = None
+    # 정규화 통계와 b_dec 초기화는 학습량과 무관하게 부분표본이면 충분하다. 학습 예산이
+    # 커질 때 이 둘이 같이 커지면(특히 b_dec는 Weiszfeld 반복마다 전체 패스를 다시 돈다)
+    # 준비 단계가 학습보다 비싸진다. None이면 max_train_tokens를 따른다.
+    max_normalizer_tokens: Optional[int] = None
+    max_bdec_tokens: Optional[int] = None
     cache_dtype: str = "float16"
     normalize_chunk_size: int = 65_536
     source_mode: str = "auto"  # "auto", "cache", "stream"
@@ -346,7 +372,11 @@ class SAEConfig:
     active_threshold: float = 0.2
     l1_reg: float = 1e-4
     batch_size: int = 7096
-    bias_init_geom_max_iter: int = 100
+    # Weiszfeld 반복 1회 = ViT forward 전체 패스 1회 + 100만 토큰 float64 CPU 연산이라
+    # (Utils/SAE_utils.compute_b_dec_init_streaming), 100회면 학습 자체보다 오래 걸린다.
+    # b_dec는 학습되는 파라미터라 이건 초기값일 뿐이고, PatchSAE Table 2의 Dec. bias
+    # ablation도 geom(L0 29.48) vs mean(32.47)으로 초기화 방식의 영향이 작다고 본다.
+    bias_init_geom_max_iter: int = 10
     bias_init_geom_tol: float = 1e-5
     model_compile: bool = True
     amp_dtype: str = "bfloat16"
@@ -368,6 +398,55 @@ class SAEOutputConfig:
     grid_dir_name: str = "grid_search"
     plot_display_seconds: int = 0
     plot_dpi: int = 200
+
+
+@dataclass
+class SAESparsityConstraintConfig:
+    """best checkpoint / best trial 선정에 거는 희소성 제약.
+
+    학습 손실은 건드리지 않는다 — L1 압력은 `SAEConfig.l1_reg` 그대로다. 이 제약은
+    "어느 epoch / 어느 trial을 남길 것인가"에만 관여한다(문헌 관행: L1로 누르고 L0로 고른다).
+
+    metric은 `l0_raw`(z>0, 임계 없는 진짜 L0)를 기본으로 한다. `mean_l0`는
+    `active_threshold`(기본 0.2) 초과 개수라 활성 크기가 작아지면 실제 밀도와 무관하게
+    작아진다 — 제약 지표로 쓰면 dense한 SAE가 통과한다.
+
+    l0_max=None이면 제약 없이 기존 동작 그대로다."""
+
+    l0_max: Optional[float] = None
+    metric: str = "l0_raw"  # "l0_raw"(z>0) | "mean_l0"(z>active_threshold)
+
+
+@dataclass
+class SAEDiagnosticsConfig:
+    """perturbation latent 랭킹과 latent intervention 곡선이 함께 쓰는 평가 예산.
+
+    두 단계는 val의 **같은 부분집합**을 쓴다 — 랭킹에서 고른 cue latent를 같은 이미지에서
+    검증한다. 예전에는 이 값이 오버레이 그림용 12장에 묶여 있어서 intervention의
+    acc_drop 분해능이 1/12(0.083)밖에 안 나왔고, cue와 random의 차이가 이미지 한 장
+    단위로만 보였다.
+
+    eval_images=None이면 val 전체를 쓴다. intervention 비용은
+    (spec 수 x alpha 수) x 이미지 수에 정확히 선형이므로(기본 15 x 7 = 105 구성) alpha를
+    줄이면 같은 비용으로 이미지를 늘릴 수 있다 — val 전체(5만 장)는 trial당 수 시간이다."""
+
+    eval_images: Optional[int] = 2000
+    # intervention forward의 배치. SAE encode/decode는 내부에서 청크로 쪼개지므로
+    # 이 값이 커져도 GPU 피크는 거의 안 오른다.
+    eval_batch_size: int = 64
+    # 랭킹은 이미지당 [B, patch, hidden] latent 텐서를 CPU에 들고 있어서 배치에 선형으로
+    # RAM을 먹는다(B=8, hidden 49152 기준 텐서당 약 0.3 GiB).
+    ranking_batch_size: int = 8
+    # intervention 곡선의 alpha 격자. None이면 SAE_plot_utils의 기본 7점을 쓴다.
+    # alpha=1.0은 latent를 안 건드리는 항등이라 대조군 역할을 하니 항상 넣는 게 좋다.
+    intervention_alphas: Optional[List[float]] = None
+    # cue latent 랭킹 점수. "absolute"(기존) | "relative"(상대화) | "specific"(특이도) |
+    # "relative_specific"(둘 다). absolute는 절대 변화량이라 항상 크게 켜지는 latent가
+    # 섭동 민감도와 무관하게 이긴다 — 실측에서 발화 빈도 1~3위가 세 kind 전부를 점령했다.
+    perturbation_score_mode: str = "absolute"
+    # 상대화의 분모 폭주 방지 하한(발화 빈도). relative 계열을 쓸 때만 의미가 있고,
+    # 0이면 하한 없음 — absolute가 기존과 정확히 같게 유지된다.
+    perturbation_min_frequency: float = 0.0
 
 
 @dataclass
@@ -422,10 +501,13 @@ class SAEExperimentConfig:
     logging_config: LoggingConfig = field(default_factory=LoggingConfig)
     hook: SAEBackboneHookConfig = field(default_factory=SAEBackboneHookConfig)
     token: SAETokenConfig = field(default_factory=SAETokenConfig)
+    schedule: SAETrainScheduleConfig = field(default_factory=SAETrainScheduleConfig)
     sae: SAEConfig = field(default_factory=SAEConfig)
     early_stopping: SAEEarlyStoppingConfig = field(default_factory=SAEEarlyStoppingConfig)
     output: SAEOutputConfig = field(default_factory=SAEOutputConfig)
     grid: SAEGridSearchConfig = field(default_factory=SAEGridSearchConfig)
+    sparsity: SAESparsityConstraintConfig = field(default_factory=SAESparsityConstraintConfig)
+    diagnostics: SAEDiagnosticsConfig = field(default_factory=SAEDiagnosticsConfig)
 
     def validate(self):
         if self.hook.target_block != 11 and self.hook.token_scope.lower() != "patch":
