@@ -165,6 +165,37 @@ def normalize_tokens_inplace(tokens, stats):
     return tokens
 
 
+def normalize_tokens_chunked(tokens, stats, chunk_size=65_536):
+    """저장 dtype을 유지한 채 청크 단위로 정규화한다.
+
+    `normalize_tokens_inplace(tokens.float(), ...)`는 텐서 전체를 fp32로 복제하므로
+    원본(fp16)과 사본이 동시에 살아 있는 순간 메모리가 3배로 뛴다. 검증 토큰 490만 개
+    기준 7 GiB(fp16) + 14 GiB(fp32) = 21 GiB로, 32 GiB 머신에서 터진다.
+
+    여기서는 청크만 fp32로 올려 계산하고 곧바로 원래 dtype으로 되돌려 쓴다. 추가
+    메모리는 청크 하나(기본 65,536 x 768 x 4 = 0.2 GiB)뿐이다.
+
+    fp16으로 되돌려도 되는 이유: 정규화 후 값이 대략 N(0,1)이라 fp16 상대오차가
+    1e-3 수준이고, nmse가 1e-2 자릿수라 지표에 실리는 영향이 무시할 만하다.
+    실측(2026-08-07, N=20,000 x 768, 실제 활성 스케일): 상대오차 8.9e-4.
+
+    계산만 fp32로 올리는 건 안전 마진이지 필수는 아니다 — 같은 조건에서 fp16 상태로
+    sub_/div_ 해도 상대오차 9.2e-4로 거의 같았다. 다만 청크 하나(0.2 GiB)를 올리는
+    비용이 사실상 0이고, mean/std 비가 큰 차원이 생겨도 안전하므로 fp32로 계산한다.
+
+    검증 경로는 전부 청크마다 .float()로 올려 쓰므로(evaluate_sae_tokens 등) 저장
+    dtype이 fp16이어도 그대로 동작한다."""
+    dtype = tokens.dtype
+    n = int(tokens.shape[0])
+    step = max(1, int(chunk_size))
+    for start in range(0, n, step):
+        chunk = tokens[start : start + step].float()
+        chunk.sub_(stats["mean"])
+        chunk.div_(stats["std"])
+        tokens[start : start + step] = chunk.to(dtype)
+    return tokens
+
+
 @torch.no_grad()
 def collect_tokens_with_hook(
     model,
@@ -251,7 +282,27 @@ def iter_token_batches_with_hook(model, loader, max_tokens, target_block, token_
 
 
 @torch.no_grad()
-def fit_token_normalizer_streaming(model, loader, max_tokens, target_block, token_scope, device, eps=1e-6):
+def fit_token_normalizer_streaming(model, loader, max_tokens, target_block, token_scope, device, eps=1e-6, norm_mode="per_dim"):
+    """활성 토큰의 정규화 통계를 스트리밍으로 적합한다.
+
+    norm_mode:
+      "per_dim" — 차원별 표준화. std 가 [1, D] 벡터.
+      "scalar"  — 중심화는 차원별, 배율은 전역 스칼라 하나.
+                  std = sqrt(mean_d(var_d)) 이므로 E[||x_norm||2] = sqrt(D) 가 된다.
+                  차원별 나눗셈이 raw 공간의 방향을 뒤트는 걸 피하려는 것이고,
+                  Anthropic/SAELens/OpenAI TopK 와 같은 규약이다.
+
+    두 모드 모두 std 를 [1, D] 로 돌려준다("scalar" 면 전 원소가 같은 값). 하류의
+    브로드캐스트·형태 검증(FrozenSAE)을 건드리지 않기 위해서다."""
+    mode = str(norm_mode).lower()
+    if mode not in ("per_dim", "scalar"):
+        raise ValueError(f"Unknown norm_mode: {norm_mode!r}. 'per_dim' 또는 'scalar'.")
+    return _fit_token_normalizer_streaming_impl(
+        model, loader, max_tokens, target_block, token_scope, device, eps, mode
+    )
+
+
+def _fit_token_normalizer_streaming_impl(model, loader, max_tokens, target_block, token_scope, device, eps, mode):
     token_sum = None
     token_sq_sum = None
     total = 0
@@ -274,7 +325,13 @@ def fit_token_normalizer_streaming(model, loader, max_tokens, target_block, toke
         raise RuntimeError("No tokens were seen while fitting normalizer.")
     mean = (token_sum / total).float()
     var = (token_sq_sum / total - mean.double().pow(2)).clamp_min(float(eps) ** 2).float()
-    return {"mean": mean, "std": var.sqrt().clamp_min(eps)}, total
+    if mode == "scalar":
+        # 전역 배율 하나. sqrt(mean_d(var_d)) 로 잡으면 E[||x_norm||2] = sqrt(D) 다.
+        # [1, D] 로 펼쳐 담아 하류 형태 계약을 유지한다.
+        std = var.mean().sqrt().clamp_min(eps).expand_as(var).contiguous()
+    else:
+        std = var.sqrt().clamp_min(eps)
+    return {"mean": mean, "std": std}, total
 
 
 @torch.no_grad()
@@ -344,13 +401,102 @@ def _assert_finite_grads(model):
             raise FloatingPointError(f"Non-finite gradient detected in {name}.")
 
 
-def _run_sae_step(sae, optimizer, xb, scaler, sae_config, optim_config, device, scheduler=None, token_std=None):
+class DeadLatentTracker:
+    """latent마다 '마지막 발화 이후 지난 스텝 수'를 센다.
+
+    PatchSAE 참조 구현(src/sae_training/sae_trainer.py)의 n_forward_passes_since_fired와
+    같다: 매 스텝 전체를 1 올리고 이번 배치에서 발화한 latent만 0으로 되돌린다.
+    window를 넘긴 latent가 ghost grad 대상이다.
+
+    발화 판정은 sae.dead_feature_threshold(기본 1e-8, 사실상 z>0)로 하며 보고용
+    active_threshold(0.2)와 별개다 — 후자로 재면 '작게라도 켜지는' latent까지 dead로
+    몰아 ghost 대상이 과하게 커진다."""
+
+    def __init__(self, hidden_dim, window, threshold, device):
+        self.window = int(window)
+        self.threshold = float(threshold)
+        self.steps_since_fired = torch.zeros(int(hidden_dim), dtype=torch.long, device=device)
+
+    @torch.no_grad()
+    def dead_mask(self):
+        return self.steps_since_fired > self.window
+
+    @torch.no_grad()
+    def update(self, z):
+        self.steps_since_fired += 1
+        self.steps_since_fired[(z > self.threshold).any(dim=0)] = 0
+
+
+def _make_dead_tracker(sae_config, hidden_dim, device):
+    """use_ghost_grads가 꺼져 있으면 None을 돌려 ghost 경로 자체를 타지 않게 한다."""
+    if not bool(getattr(sae_config, "use_ghost_grads", False)):
+        return None
+    return DeadLatentTracker(
+        hidden_dim=hidden_dim,
+        window=getattr(sae_config, "dead_feature_window", 1000),
+        threshold=getattr(sae_config, "dead_feature_threshold", 1e-8),
+        device=device,
+    )
+
+
+def _annotate_ghost_row(row, dead_tracker, ghost_sum, train_rows, hidden_dim):
+    """검증 row에 ghost 관련 지표를 붙인다. ghost가 꺼져 있으면 아무것도 안 한다.
+
+    dead 수를 학습 중에도 보려는 것이다 — diagnostics의 dead_latent_frac은 학습이
+    다 끝나야 나오므로 ghost가 듣고 있는지 중간에 알 방법이 없다."""
+    if dead_tracker is None:
+        return row
+    dead = int(dead_tracker.dead_mask().sum().item())
+    row["train_ghost_loss"] = ghost_sum / max(1, train_rows)
+    row["dead_latents"] = dead
+    row["dead_latent_frac_train"] = dead / max(1, int(hidden_dim))
+    return row
+
+
+def _ghost_residual_loss(sae, hidden_pre, residual, recon_elementwise, dead_mask, token_std=None, max_rows=None, eps=1e-6):
+    """PatchSAE의 ghost gradient를 그대로 옮긴 것.
+
+    죽은 latent만 골라 ReLU 대신 exp()를 태우고, 그 출력이 재구성 잔차를 설명하도록
+    만든다. exp()는 pre-activation이 음수여도 기울기가 0이 아니라서, ReLU+L1이 만든
+    흡수 상태(한 번 죽으면 입력이 b_enc를 못 넘겨 영원히 0)를 빠져나올 수 있다.
+
+    residual과 recon_elementwise는 **손실이 사는 공간**으로 이미 맞춰서 받는다
+    (recon_space='raw'면 sigma 가중). W_dec 출력은 정규화 공간이라 token_std로 올린다.
+
+    마지막 재스케일은 원 구현 그대로다:
+        rescale = (recon_elementwise / (ghost_elementwise + eps)).detach()
+    이 때문에 ghost 손실의 **값**은 recon 손실과 거의 같아진다 — 버그가 아니라
+    기울기 크기만 맞추려는 장치다(rescale이 detach되어 있어 값이 아니라 기울기에만
+    영향을 준다). 로그에서 ghost_loss ≈ train_mse로 보이는 게 정상이다."""
+    base = unwrap_compiled_model(sae)
+    if max_rows is not None and hidden_pre.shape[0] > int(max_rows):
+        rows = slice(0, int(max_rows))
+        hidden_pre, residual, recon_elementwise = hidden_pre[rows], residual[rows], recon_elementwise[rows]
+
+    ghost_acts = torch.exp(hidden_pre[:, dead_mask].float())
+    ghost_out = ghost_acts @ base.W_dec[dead_mask, :].float()
+    if token_std is not None:
+        ghost_out = ghost_out * token_std
+
+    residual = residual.detach().float()
+    norm_scale = residual.norm(dim=-1) / (eps + 2.0 * ghost_out.norm(dim=-1))
+    ghost_out = ghost_out * norm_scale[:, None].detach()
+
+    ghost_elementwise = (ghost_out - residual).pow(2) / residual.pow(2).sum(dim=-1, keepdim=True).sqrt().clamp_min(eps)
+    rescale = (recon_elementwise.detach().float() / (ghost_elementwise.detach() + eps))
+    return (rescale * ghost_elementwise).mean()
+
+
+def _run_sae_step(sae, optimizer, xb, scaler, sae_config, optim_config, device, scheduler=None, token_std=None, dead_tracker=None):
     """SGD 한 스텝. xb는 정규화된 활성이다.
 
     sae_config.recon_space="raw"이면 재구성 오차를 denorm 공간에서 잰다. denorm을 명시적으로
     계산할 필요는 없다 — mu가 상쇄되므로
         (x_hat*sigma + mu) - (x*sigma + mu) = (x_hat - x)*sigma
-    이고, 큰 값끼리 빼면서 정밀도를 잃지도 않는다."""
+    이고, 큰 값끼리 빼면서 정밀도를 잃지도 않는다.
+
+    dead_tracker를 주면 ghost gradient가 켜진다. ghost_loss는 dead latent가 하나도
+    없으면 None이다."""
     amp_dtype = get_torch_dtype(sae_config.amp_dtype)
     amp_enabled = _amp_enabled(device, optim_config.use_amp)
     autocast_device = "cuda" if str(device).startswith("cuda") else "cpu"
@@ -360,19 +506,46 @@ def _run_sae_step(sae, optimizer, xb, scaler, sae_config, optim_config, device, 
     if recon_space == "raw" and token_std is None:
         raise ValueError("sae.recon_space='raw'는 token_std가 필요하다 (token_stats['std']를 device에 올려 넘길 것).")
 
+    # ghost 마스크는 **이번 스텝 이전까지의** 발화 이력으로 정한다 (PatchSAE와 같은 순서).
+    dead_mask = None if dead_tracker is None else dead_tracker.dead_mask()
+    need_pre = dead_mask is not None and bool(dead_mask.any())
+
     with torch.autocast(device_type=autocast_device, dtype=amp_dtype, enabled=amp_enabled):
-        x_hat, z = sae(xb)
-        if recon_space == "raw":
-            recon_loss = ((x_hat - xb) * token_std).pow(2).mean()
+        # ghost를 안 쓰면 hidden_pre를 받지 않는다 — (rows x hidden) 텐서를 스텝 내내
+        # 살려두면 bf16 7096x49152 기준 0.7 GiB가 그냥 묶인다.
+        if need_pre:
+            x_hat, z, hidden_pre = sae(xb, return_pre=True)
         else:
-            recon_loss = F.mse_loss(x_hat, xb)
+            x_hat, z = sae(xb)
+            hidden_pre = None
+
+        if recon_space == "raw":
+            recon_elementwise = ((x_hat - xb) * token_std).pow(2)
+        else:
+            recon_elementwise = (x_hat - xb).pow(2)
+        recon_loss = recon_elementwise.mean()
         l1_loss = z.abs().sum(dim=-1).mean()
         loss = recon_loss + float(sae_config.l1_reg) * l1_loss
+
+        ghost_loss = None
+        if need_pre:
+            ghost_loss = _ghost_residual_loss(
+                sae,
+                hidden_pre,
+                (xb - x_hat) * token_std if recon_space == "raw" else xb - x_hat,
+                recon_elementwise,
+                dead_mask,
+                token_std=token_std if recon_space == "raw" else None,
+                max_rows=getattr(sae_config, "ghost_grad_max_rows", None),
+            )
+            loss = loss + ghost_loss
 
     if sae_config.check_finite:
         _assert_finite_tensor("SAE forward loss", loss)
         _assert_finite_tensor("SAE reconstruction loss", recon_loss)
         _assert_finite_tensor("SAE L1 loss", l1_loss)
+        if ghost_loss is not None:
+            _assert_finite_tensor("SAE ghost gradient loss", ghost_loss)
 
     optimizer.zero_grad(set_to_none=True)
     if scaler.is_enabled():
@@ -393,7 +566,9 @@ def _run_sae_step(sae, optimizer, xb, scaler, sae_config, optim_config, device, 
     if scheduler is not None:
         scheduler.step()
     unwrap_compiled_model(sae).set_decoder_norm_to_unit_norm()
-    return loss, recon_loss, l1_loss, x_hat, z
+    if dead_tracker is not None:
+        dead_tracker.update(z)
+    return loss, recon_loss, l1_loss, x_hat, z, ghost_loss
 
 
 def format_sae_epoch_log(row, hidden_dim=None, threshold=0.2, patience=None):
@@ -416,6 +591,12 @@ def format_sae_epoch_log(row, hidden_dim=None, threshold=0.2, patience=None):
             f"{best_active_text}"
             f" | no_improve={int(row['early_stop_bad_epochs'])}/{patience}"
         )
+    ghost_text = ""
+    if "dead_latents" in row:
+        ghost_text = (
+            f" | ghost={float(row.get('train_ghost_loss', 0.0)):.6f}"
+            f" | dead={int(row['dead_latents'])} ({float(row['dead_latent_frac_train']) * 100:.1f}%)"
+        )
     return (
         f"epoch {int(row['epoch']):03d} | "
         f"train_loss={row['train_loss']:.6f} | "
@@ -424,7 +605,7 @@ def format_sae_epoch_log(row, hidden_dim=None, threshold=0.2, patience=None):
         f"val_mse={row['mse']:.6f} | "
         f"val_nmse={row['normalized_mse']:.4f} | "
         f"active>{active_threshold:g}={active_mean_count:.2f}/{active_total_text} ({active_ratio_text})"
-        f"{time_text}{early_stop_text}"
+        f"{ghost_text}{time_text}{early_stop_text}"
     )
 
 
@@ -504,18 +685,50 @@ def _make_optimizer(sae, optim_config):
     return torch.optim.AdamW(sae.parameters(), lr=float(optim_config.lr), weight_decay=float(optim_config.weight_decay))
 
 
-def _make_scheduler(optimizer, optim_config):
-    """constant-with-warmup 스케줄러. warmup 구간에서 lr을 선형으로 올리고 이후 고정한다.
+def _make_scheduler(optimizer, optim_config, total_steps=None):
+    """warmup(선형 상승) → 고정 → 후반부 감쇠(옵션) 스케줄러.
 
-    PatchSAE 참조 구현의 'constantwithwarmup'과 같은 식이다
-    (`min(1.0, (step + 1) / warmup_steps)`). lr_warmup_steps가 0이면 None을 돌려
-    스케줄러 없이 기존 동작을 유지한다."""
+    warmup 구간은 PatchSAE 참조 구현의 'constantwithwarmup'과 같은 식이다
+    (`min(1.0, (step + 1) / warmup_steps)`).
+
+    감쇠는 `optim_config.lr_decay`가 "linear"/"cosine"일 때만 붙고, 전체 스텝 수를
+    알아야 하므로 `total_steps`가 필요하다. 감쇠를 켰는데 total_steps를 못 주면
+    조용히 고정 lr로 도는 게 더 위험하므로 ValueError를 낸다.
+
+    warmup도 감쇠도 꺼져 있으면 None을 돌려 스케줄러 자체를 만들지 않는다(기존 동작)."""
     warmup_steps = int(getattr(optim_config, "lr_warmup_steps", 0) or 0)
-    if warmup_steps <= 0:
-        return None
-    return torch.optim.lr_scheduler.LambdaLR(
-        optimizer, lr_lambda=lambda step: min(1.0, (step + 1) / warmup_steps)
-    )
+    decay = str(getattr(optim_config, "lr_decay", "none") or "none").lower()
+    if decay not in ("none", "linear", "cosine"):
+        raise ValueError(f"Unknown optim_config.lr_decay: {decay!r}. 'none' | 'linear' | 'cosine'.")
+
+    if decay == "none":
+        if warmup_steps <= 0:
+            return None
+        return torch.optim.lr_scheduler.LambdaLR(
+            optimizer, lr_lambda=lambda step: min(1.0, (step + 1) / warmup_steps)
+        )
+
+    if total_steps is None or int(total_steps) <= 0:
+        raise ValueError(
+            f"optim_config.lr_decay={decay!r}인데 total_steps를 안 줬다 — 감쇠 시작 지점을 정할 수 없다."
+        )
+    total = int(total_steps)
+    start_frac = float(getattr(optim_config, "lr_decay_start_frac", 0.8))
+    final_frac = float(getattr(optim_config, "lr_final_frac", 0.0))
+    start = start_frac * total
+    span = max(1.0, total - start)
+
+    def lr_lambda(step):
+        s = step + 1
+        if warmup_steps > 0 and s < warmup_steps:
+            return s / warmup_steps
+        if s <= start:
+            return 1.0
+        p = min(1.0, (s - start) / span)  # 감쇠 구간 내 진행도 0..1
+        scale = (1.0 - p) if decay == "linear" else 0.5 * (1.0 + math.cos(math.pi * p))
+        return final_frac + (1.0 - final_frac) * scale
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
 
 def _raw_space_stats(config, token_stats, device):
@@ -577,7 +790,9 @@ def train_sae_token_budget(
     sae = _compile_sae_if_needed(_new_sae(input_dim, hidden_dim, b_dec_init, config, device), config.sae)
     optimizer = _make_optimizer(sae, config.optim_config)
     scaler = _make_grad_scaler(device, config.optim_config.use_amp, get_torch_dtype(config.sae.amp_dtype))
-    scheduler = _make_scheduler(optimizer, config.optim_config)
+    # 예산을 배치로 나눈 값이 곧 총 스텝 수다 — lr 감쇠가 이걸 알아야 시작 지점을 정한다.
+    total_steps = math.ceil(budget / int(config.sae.batch_size))
+    scheduler = _make_scheduler(optimizer, config.optim_config, total_steps=total_steps)
     token_std, eval_stats = _raw_space_stats(config, token_stats, device)
     history = []
     early_stopper = EarlyStopper(
@@ -590,9 +805,16 @@ def train_sae_token_budget(
         verbose=config.early_stopping.save_verbose,
     )
 
+    dead_tracker = _make_dead_tracker(config.sae, hidden_dim, device)
+
     print(f"SAE token-budget training: {budget:,} tokens, eval every {eval_every} steps")
+    if dead_tracker is not None:
+        print(
+            f"ghost gradients ON: dead_feature_window={dead_tracker.window} steps, "
+            f"threshold={dead_tracker.threshold:g}"
+        )
     n_tokens = n_steps = eval_index = 0
-    train_loss_sum = train_mse_sum = train_l1_sum = 0.0
+    train_loss_sum = train_mse_sum = train_l1_sum = train_ghost_sum = 0.0
     train_rows = 0
     window_start = time.perf_counter()
     carry = None
@@ -613,17 +835,19 @@ def train_sae_token_budget(
 
                 for start in range(0, full_count, config.sae.batch_size):
                     xb = token_batch[start : start + config.sae.batch_size].float().to(device)
-                    loss, recon_loss, l1_loss, x_hat, z = _run_sae_step(
-                        sae, optimizer, xb, scaler, config.sae, config.optim_config, device, scheduler, token_std
+                    loss, recon_loss, l1_loss, x_hat, z, ghost_loss = _run_sae_step(
+                        sae, optimizer, xb, scaler, config.sae, config.optim_config, device, scheduler, token_std, dead_tracker
                     )
                     train_loss_sum += float(loss.item()) * xb.shape[0]
                     train_mse_sum += float(recon_loss.item()) * xb.shape[0]
                     train_l1_sum += float(l1_loss.item()) * xb.shape[0]
+                    if ghost_loss is not None:
+                        train_ghost_sum += float(ghost_loss.item()) * xb.shape[0]
                     train_rows += xb.shape[0]
                     n_tokens += xb.shape[0]
                     n_steps += 1
                     pbar.update(xb.shape[0])
-                    del xb, x_hat, z, loss, recon_loss, l1_loss
+                    del xb, x_hat, z, loss, recon_loss, l1_loss, ghost_loss
 
                     if n_steps % eval_every == 0 or n_tokens >= budget:
                         eval_index += 1
@@ -632,10 +856,11 @@ def train_sae_token_budget(
                             train_loss_sum, train_mse_sum, train_l1_sum, train_rows,
                             time.perf_counter() - window_start, config, eval_stats,
                         )
+                        _annotate_ghost_row(row, dead_tracker, train_ghost_sum, train_rows, hidden_dim)
                         _, should_stop = early_stopper.step(row["normalized_mse"], sae, row)
                         history.append(row)
                         print(format_sae_epoch_log(row, hidden_dim=hidden_dim, threshold=config.sae.active_threshold, patience=config.early_stopping.patience))
-                        train_loss_sum = train_mse_sum = train_l1_sum = 0.0
+                        train_loss_sum = train_mse_sum = train_l1_sum = train_ghost_sum = 0.0
                         train_rows = 0
                         window_start = time.perf_counter()
                         sae.train()
@@ -686,7 +911,11 @@ def train_sae_streaming(
     sae = _compile_sae_if_needed(_new_sae(input_dim, hidden_dim, b_dec_init, config, device), config.sae)
     optimizer = _make_optimizer(sae, config.optim_config)
     scaler = _make_grad_scaler(device, config.optim_config.use_amp, get_torch_dtype(config.sae.amp_dtype))
-    scheduler = _make_scheduler(optimizer, config.optim_config)
+    # expected_tokens를 모르면 총 스텝을 못 세므로 None을 넘긴다 — 감쇠가 켜져 있으면
+    # _make_scheduler가 거기서 막는다(조용히 고정 lr로 도는 것보다 낫다).
+    _steps_per_epoch = math.ceil(int(expected_tokens) / config.sae.batch_size) if expected_tokens is not None else None
+    _total_steps = _steps_per_epoch * int(config.optim_config.epochs) if _steps_per_epoch else None
+    scheduler = _make_scheduler(optimizer, config.optim_config, total_steps=_total_steps)
     token_std, eval_stats = _raw_space_stats(config, token_stats, device)
     history = []
     early_stopper = EarlyStopper(
@@ -699,12 +928,13 @@ def train_sae_streaming(
         verbose=config.early_stopping.save_verbose,
     )
     expected_steps = math.ceil(int(expected_tokens) / config.sae.batch_size) if expected_tokens is not None else None
+    dead_tracker = _make_dead_tracker(config.sae, hidden_dim, device)
     print(f"SAE train tokens per epoch: {expected_tokens if expected_tokens is not None else 'unknown'}")
 
     for epoch in range(1, int(config.optim_config.epochs) + 1):
         epoch_start_time = time.perf_counter()
         sae.train()
-        train_loss_sum = train_mse_sum = train_l1_sum = 0.0
+        train_loss_sum = train_mse_sum = train_l1_sum = train_ghost_sum = 0.0
         train_rows = 0
         carry = None
 
@@ -732,16 +962,18 @@ def train_sae_streaming(
 
                 for start in range(0, full_count, config.sae.batch_size):
                     xb = token_batch[start : start + config.sae.batch_size].float().to(device)
-                    loss, recon_loss, l1_loss, x_hat, z = _run_sae_step(
-                        sae, optimizer, xb, scaler, config.sae, config.optim_config, device, scheduler, token_std
+                    loss, recon_loss, l1_loss, x_hat, z, ghost_loss = _run_sae_step(
+                        sae, optimizer, xb, scaler, config.sae, config.optim_config, device, scheduler, token_std, dead_tracker
                     )
                     train_loss_sum += float(loss.item()) * xb.shape[0]
                     train_mse_sum += float(recon_loss.item()) * xb.shape[0]
                     train_l1_sum += float(l1_loss.item()) * xb.shape[0]
+                    if ghost_loss is not None:
+                        train_ghost_sum += float(ghost_loss.item()) * xb.shape[0]
                     train_rows += xb.shape[0]
                     if pbar.total is not None:
                         pbar.update(1)
-                    del xb, x_hat, z, loss, recon_loss, l1_loss
+                    del xb, x_hat, z, loss, recon_loss, l1_loss, ghost_loss
 
                 if full_count < token_batch.shape[0]:
                     carry = token_batch[full_count:].detach().cpu()
@@ -751,16 +983,18 @@ def train_sae_streaming(
 
             if carry is not None and carry.numel() > 0:
                 xb = carry.float().to(device)
-                loss, recon_loss, l1_loss, x_hat, z = _run_sae_step(
-                    sae, optimizer, xb, scaler, config.sae, config.optim_config, device, scheduler, token_std
+                loss, recon_loss, l1_loss, x_hat, z, ghost_loss = _run_sae_step(
+                    sae, optimizer, xb, scaler, config.sae, config.optim_config, device, scheduler, token_std, dead_tracker
                 )
                 train_loss_sum += float(loss.item()) * xb.shape[0]
                 train_mse_sum += float(recon_loss.item()) * xb.shape[0]
                 train_l1_sum += float(l1_loss.item()) * xb.shape[0]
+                if ghost_loss is not None:
+                    train_ghost_sum += float(ghost_loss.item()) * xb.shape[0]
                 train_rows += xb.shape[0]
                 if pbar.total is not None:
                     pbar.update(1)
-                del xb, x_hat, z, loss, recon_loss, l1_loss, carry
+                del xb, x_hat, z, loss, recon_loss, l1_loss, ghost_loss, carry
 
         row = _build_epoch_row(
             sae,
@@ -775,6 +1009,7 @@ def train_sae_streaming(
             config,
             token_stats=eval_stats,
         )
+        _annotate_ghost_row(row, dead_tracker, train_ghost_sum, train_rows, hidden_dim)
         _, should_stop = early_stopper.step(row["normalized_mse"], sae, row)
         history.append(row)
         print(format_sae_epoch_log(row, hidden_dim=hidden_dim, threshold=config.sae.active_threshold, patience=config.early_stopping.patience))
@@ -833,7 +1068,10 @@ def train_sae_cached(
     sae = _compile_sae_if_needed(_new_sae(input_dim, hidden_dim, b_dec_init, config, device), config.sae)
     optimizer = _make_optimizer(sae, config.optim_config)
     scaler = _make_grad_scaler(device, config.optim_config.use_amp, get_torch_dtype(config.sae.amp_dtype))
-    scheduler = _make_scheduler(optimizer, config.optim_config)
+    # 캐시 모드는 epoch마다 loader를 한 바퀴 돈다 — 총 스텝 = epochs x 배치 수.
+    scheduler = _make_scheduler(
+        optimizer, config.optim_config, total_steps=len(token_loader) * int(config.optim_config.epochs)
+    )
     token_std, eval_stats = _raw_space_stats(config, token_stats, device)
     history = []
     early_stopper = EarlyStopper(
@@ -845,12 +1083,13 @@ def train_sae_cached(
         l0_max=config.sparsity.l0_max,
         verbose=config.early_stopping.save_verbose,
     )
+    dead_tracker = _make_dead_tracker(config.sae, hidden_dim, device)
     print(f"SAE cached train tokens per epoch: {len(train_tokens):,}")
 
     for epoch in range(1, int(config.optim_config.epochs) + 1):
         epoch_start_time = time.perf_counter()
         sae.train()
-        train_loss_sum = train_mse_sum = train_l1_sum = 0.0
+        train_loss_sum = train_mse_sum = train_l1_sum = train_ghost_sum = 0.0
         train_rows = 0
 
         for (xb_cpu,) in tqdm(
@@ -860,14 +1099,16 @@ def train_sae_cached(
             **TQDM_KW,
         ):
             xb = xb_cpu.to(device, non_blocking=True).float()
-            loss, recon_loss, l1_loss, x_hat, z = _run_sae_step(
-                sae, optimizer, xb, scaler, config.sae, config.optim_config, device, scheduler, token_std
+            loss, recon_loss, l1_loss, x_hat, z, ghost_loss = _run_sae_step(
+                sae, optimizer, xb, scaler, config.sae, config.optim_config, device, scheduler, token_std, dead_tracker
             )
             train_loss_sum += float(loss.item()) * xb.shape[0]
             train_mse_sum += float(recon_loss.item()) * xb.shape[0]
             train_l1_sum += float(l1_loss.item()) * xb.shape[0]
+            if ghost_loss is not None:
+                train_ghost_sum += float(ghost_loss.item()) * xb.shape[0]
             train_rows += xb.shape[0]
-            del xb, x_hat, z, loss, recon_loss, l1_loss
+            del xb, x_hat, z, loss, recon_loss, l1_loss, ghost_loss
 
         row = _build_epoch_row(
             sae,
@@ -882,6 +1123,7 @@ def train_sae_cached(
             config,
             token_stats=eval_stats,
         )
+        _annotate_ghost_row(row, dead_tracker, train_ghost_sum, train_rows, hidden_dim)
         _, should_stop = early_stopper.step(row["normalized_mse"], sae, row)
         history.append(row)
         print(format_sae_epoch_log(row, hidden_dim=hidden_dim, threshold=config.sae.active_threshold, patience=config.early_stopping.patience))

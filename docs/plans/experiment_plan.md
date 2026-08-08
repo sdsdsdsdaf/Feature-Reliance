@@ -100,6 +100,7 @@ x_t ─▶ ViT block0..10 ─(no_grad)─▶ h ─▶ SAE.encode ─(detach)─�
 
 > 설계 원칙: **적응 엔진(TTA 루프)은 고정하고 "어디서(basis) 적응하나"만 변수로** 두어 "왜 SAE"를 인과적으로 격리. 싸게 falsify되는 것부터 배치.
 > 공통 모델(별도 명시 없으면): backbone `vit_base_patch16_224`, SAE `outputs/reservoir_sae/vit_b_sae.pt`(block10·patch·`input_dim=768`·`hidden_dim=12288`(**expansion 16**)). SAE는 정규화 공간에서 동작 — ckpt의 `token_mean`/`token_std`를 적용/역적용해야 함.
+> **⚠️ 계기 교체 진행 중(2026-08-07)** — expansion 64(`K=49152`)·`recon_space="raw"`로 재학습 중이다. trial_0000 실측 `l0_raw` 330.6 / `cosine` 0.9508, 그리고 **SAE를 경로에 끼우기만 한 대가가 20.3점 → 1.85점**으로 줄었다. 확정 전까지 아래 수치·각주는 전부 옛 ckpt 기준으로 읽을 것. 상세는 `Plans.md` Spec delta.
 > 데이터 보유 현황 — **보유**: ImageNet-1k, ImageNet-C(19종=15 test+4 extra, `data/imagenet-c`), imagenette, Broden(`data/broden1_227`), **Waterbirds(`data/waterbirds/waterbird_complete95_forest2water2`)**. **확보 필요**: ColoredMNIST, ImageNet-R/Sketch/A, ImageNet-9(BG Challenge).
 > **ImageNet-C 규약**: `data/imagenet-c`(공식 precomputed, Zenodo 2235448)를 **그대로 사용, 재생성(on-the-fly) 안 함** — 라이브러리 버전 드리프트로 baseline과 비교 불가해지는 것 방지. recurring 스트림도 precomputed에서 **순서만 재배열**. **HP 튜닝은 4 extra(`gaussian_blur·saturate·spatter·speckle_noise`) hold-out에서, 보고는 15 test에서** → target 라벨 없는 HP 선택 방어.
 
@@ -284,6 +285,7 @@ Waterbirds는 새를 배경 위에 **합성해서** 만든 데이터셋이므로
 - **latent gain이 채널 gain 대비 worst-group에서 우세**(특히 biased). 채널 gain이 이기거나 비등하면 **test time에 SAE가 불필요**하다는 뜻 → thesis 붕괴 게이트.
 - **random dictionary가 latent gain에 근접하면** 이득의 원인이 "학습된 딕셔너리"가 아니라 "sparse overcomplete 구조" 자체 → 기여 주장을 그쪽으로 정정해야 한다.
 - **계기 조건 각주**: 현 checkpoint는 패치당 실측 `L0 ≈ 497`(768차원 내)이라 세 arm의 유효 rank가 가까워 **분리가 약할 수 있다**. `L0` 수십 급 계기(PatchSAE 등)로 올린 뒤 재측정 권장.
+  - **2026-08-07 진행**: 이 각주에 대응해 재학습한 계기(expansion 64)의 trial_0000이 `l0_raw` **330.6**(`z>0`) / `active>0.2` 138.7을 냈다. 497보다 낫지만 PatchSAE 운용점(148.56, `z>0`)의 여전히 **2.2배**라 이 각주는 아직 유효하다. `dead_latent_frac`이 64.8%로 나와 TopK/BatchTopK 전환이 결정됐고, 그게 서면 `L0`를 직접 지정할 수 있어 이 조건이 해소된다.
 
 ---
 

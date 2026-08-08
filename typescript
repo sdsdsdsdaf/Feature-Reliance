@@ -1,0 +1,11 @@
+Script started on 2026-08-08 15:08:18+09:00 [COMMAND="python3 SAE_validation.py" TERM="xterm-256color" TTY="/dev/pts/0" COLUMNS="196" LINES="48"]
+^C^C^CTraceback (most recent call last):
+  File "/home/kim/Project/Feature-Reliance/SAE_validation.py", line 50, in <module>
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/kim/miniconda3/envs/feature_reliance_cu126/lib/python3.11/site-packages/torch/cuda/__init__.py", line 174, in is_available
+    return torch._C._cuda_getDeviceCount() > 0
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt
+^C
+Script done on 2026-08-08 15:08:23+09:00 [COMMAND_EXIT_CODE="130"]

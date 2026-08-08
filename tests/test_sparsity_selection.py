@@ -30,12 +30,12 @@ def _row(epoch, nmse, l0_raw, mean_l0=None):
     }
 
 
-def _run(tmp_path, rows, l0_max=None, l0_metric="l0_raw", patience=None):
+def _run(tmp_path, rows, l0_max=None, l0_metric="l0_raw", patience=None, eps=5e-5):
     """rows를 순서대로 흘려보내고 (stopper, 저장된 checkpoint) 를 돌려준다."""
     ckpt = tmp_path / "best.pt"
     stopper = EarlyStopper(
         patience=patience,
-        eps=5e-5,
+        eps=eps,
         checkpoint_path=ckpt,
         l0_metric=l0_metric,
         l0_max=l0_max,
@@ -96,6 +96,48 @@ def test_patience_resets_when_constraint_first_met(tmp_path):
     assert stopper.bad_epochs == 0
     assert stopper.should_stop is False
     assert stopper.best_epoch == 6
+
+
+def test_eps_below_noise_scale_kills_the_sparsity_tie_break(tmp_path):
+    """eps가 val_nmse 노이즈보다 작으면 "동점이면 희소한 쪽" 규칙이 죽는다.
+
+    grid_raw_loss/trial_0000 실측을 그대로 넣었다. eval 9(0.0850/188.08)가 끝까지 best로
+    남고, 활성이 25% 적은 eval 62(0.0852/139.29)가 0.0002 차이로 밀린다 — 그 0.0002는
+    val_nmse 노이즈(+-0.001) 안이라 의미 있는 차이가 아니다."""
+    rows = [
+        _row(9, 0.0850, 700, mean_l0=188.08),
+        _row(62, 0.0852, 700, mean_l0=139.29),
+        _row(65, 0.0858, 700, mean_l0=137.42),
+    ]
+    stopper, saved = _run(tmp_path, rows, l0_max=800, eps=5e-5)
+    assert stopper.best_epoch == 9
+    assert saved["active_mean_count"] == 188.08
+
+
+def test_eps_at_noise_scale_ratchets_toward_the_sparser_checkpoint(tmp_path):
+    """같은 rows인데 eps=1e-3이면 노이즈 창 안에서 가장 희소한 eval을 남긴다."""
+    rows = [
+        _row(9, 0.0850, 700, mean_l0=188.08),
+        _row(62, 0.0852, 700, mean_l0=139.29),
+        _row(65, 0.0858, 700, mean_l0=137.42),
+    ]
+    stopper, saved = _run(tmp_path, rows, l0_max=800, eps=1e-3)
+    assert stopper.best_epoch == 65
+    assert saved["active_mean_count"] == 137.42
+
+
+def test_tie_window_is_anchored_at_the_lowest_nmse_not_the_last_accepted(tmp_path):
+    """창이 accept될 때마다 떠내려가면 nmse가 무한정 나빠질 수 있다.
+
+    0.0850 -> 0.0858 -> 0.0866 은 이웃끼리는 eps 안이지만 최소값 기준으로는 0.0866이
+    창 밖이다. lowest_score를 기준으로 재므로 마지막 행은 더 희소해도 밀려야 한다."""
+    rows = [
+        _row(1, 0.0850, 700, mean_l0=188.0),
+        _row(2, 0.0858, 700, mean_l0=150.0),
+        _row(3, 0.0866, 700, mean_l0=120.0),   # 0.0850 기준 0.0016 > eps
+    ]
+    stopper, _ = _run(tmp_path, rows, l0_max=800, eps=1e-3)
+    assert stopper.best_epoch == 2
 
 
 def test_l0_raw_and_mean_l0_disagree(tmp_path):

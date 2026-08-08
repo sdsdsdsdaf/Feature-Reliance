@@ -379,6 +379,7 @@ Waterbirds는 2-class(`y`) 문제인데 **ImageNet head로는 못 푼다.** 그�
 - **`fail` (A는 통과, B 실패)**: 분리는 존재하지만 **라벨 없이는 못 집는다**는 뜻. thesis가 죽지는 않지만 v1의 `c_k` anchor 설계와 "test time에 spurious를 겨냥한다"는 서술을 **전면 수정**해야 한다. T1.4b의 `anchor="ck"` 조건도 근거를 잃는다.
 - ③(Broden)은 `pass`/`fail`을 가르지 않는다. 개념 이름이 안 붙어도 (A)(B)가 서면 통과이고, 해석성 주장만 약화된다.
 - **실패를 계기 탓과 구분할 것.** 현 ckpt는 패치당 `L0 ≈ 497`(768차원 내)로 희소하지 않다. `purity_rate`가 낮게 나오면 thesis가 틀린 게 아니라 계기가 무딘 것일 수 있으므로, `L0` 수십 급 SAE(PatchSAE 등)로 재측정한 뒤 판정한다. 이 재측정 없이 `fail`을 확정하지 않는다.
+  - **2026-08-07**: 재학습 중인 계기(expansion 64)가 `l0_raw` 330.6까지 내려왔으나 PatchSAE 운용점의 2.2배라 **이 조항은 아직 해제되지 않았다.** TopK 전환 후 `L0`를 직접 지정한 계기로 재측정할 것. 상세는 `Plans.md` Spec delta 2026-08-07.
 
 ---
 
@@ -424,7 +425,7 @@ for arm in ["latent_gain", "channel_gain", "random_dict"]:
 - `pass`: `latent_gain`의 worst-group acc가 **`channel_gain`과 `random_dict` 양쪽보다** 시드 표준편차를 넘어 우세.
 - **`fail` (채널 gain이 이기거나 비등)**: test time에 SAE가 불필요하다는 뜻 → **thesis 붕괴 게이트.**
 - **`random_dict`가 근접**: 이득의 원인이 "학습된 딕셔너리"가 아니라 "sparse overcomplete 구조" 자체다. 기여 주장을 그쪽으로 정정해야 한다(실패는 아니지만 논문의 claim이 바뀐다).
-- **계기 조건 각주**: 현 ckpt에서는 세 arm의 유효 rank가 가까워(패치당 `L0 ≈ 497` / 768차원) **분리가 약할 수 있다.** 결론이 애매하면 계기를 올린 뒤 재측정한다.
+- **계기 조건 각주**: 현 ckpt에서는 세 arm의 유효 rank가 가까워(패치당 `L0 ≈ 497` / 768차원) **분리가 약할 수 있다.** 결론이 애매하면 계기를 올린 뒤 재측정한다. (2026-08-07 재학습 계기는 `l0_raw` 330.6 — 개선됐으나 이 조건을 해제할 만큼은 아니다. `Plans.md` Spec delta 참조.)
 
 ---
 

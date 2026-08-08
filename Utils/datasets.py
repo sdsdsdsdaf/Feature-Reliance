@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import csv
 import os
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -17,6 +18,12 @@ import numpy as np
 from PIL import Image
 from torch.utils.data import Dataset
 from torchvision.datasets import ImageFolder
+
+# 일부 ImageNet 계열 JPEG은 EXIF 헤더가 살짝 깨져 있어, PIL이 이미지를 로드할 때마다
+# "Corrupt EXIF data. Expecting to read N bytes ..." UserWarning을 던진다. 픽셀·라벨과
+# 무관한 메타데이터 경고라 무해하지만 num_workers 워커까지 로그를 도배한다. 정확히
+# 이 메시지만 억제하고(다른 경고는 그대로 유지), 이 모듈을 import하는 모든 진입점에 적용된다.
+warnings.filterwarnings("ignore", message=".*orrupt EXIF data.*", category=UserWarning)
 
 from Utils.Dataset import ImageFolderDS
 from Utils.imagenet_subsets import (

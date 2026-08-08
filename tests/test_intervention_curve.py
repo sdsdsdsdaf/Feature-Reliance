@@ -1,6 +1,6 @@
 """evaluate_latent_intervention_curve 계약 테스트.
 
-이미지 루프를 바깥으로 빼면서(clean forward를 구성마다 다시 돌지 않도록) 값이
+캐시+꼬리 구조로 바꾸면서(blocks[0..target_block]을 구성마다 다시 돌지 않도록) 값이
 바뀌지 않았는지 고정한다. 검증하는 것:
 - record의 개수/순서가 (spec x alpha) 그대로다
 - 개입이 없으면(latent_ids 비었거나 alpha=1.0) clean과 동치라 acc_drop / js가 0이다
@@ -27,20 +27,29 @@ class _Block(nn.Module):
 
 
 class _TinyViT(nn.Module):
-    """blocks[i] 훅과 (B, tokens, dim) -> (B, classes)만 만족하는 최소 백본."""
+    """timm ViT 중 개입 경로가 실제로 쓰는 표면만 흉내낸다.
+
+    캐시+꼬리 구조로 바뀌면서 blocks 말고 norm / forward_head / head 도 필요해졌다
+    (Utils.SAE_plot_utils.run_vit_tail 이 그 순서로 호출한다)."""
 
     def __init__(self, depth=2):
         super().__init__()
         self.blocks = nn.ModuleList([_Block() for _ in range(depth)])
+        self.norm = nn.Identity()
         self.head = nn.Linear(DIM, CLASSES)
         self.clean_forwards = 0
+
+    def forward_head(self, x, pre_logits=False):
+        feat = x.mean(dim=1)
+        return feat if pre_logits else self.head(feat)
 
     def forward(self, images):
         self.clean_forwards += 1
         x = images.reshape(images.shape[0], 1, DIM).expand(-1, TOKENS, DIM).contiguous()
         for blk in self.blocks:
             x = blk(x)
-        return self.head(x.mean(dim=1))
+        x = self.norm(x)
+        return self.head(self.forward_head(x, pre_logits=True))
 
 
 @pytest.fixture
@@ -101,17 +110,22 @@ def test_aggregation_is_batch_size_invariant(setup):
             assert ra[key] == pytest.approx(rb[key], abs=1e-6), key
 
 
-def test_clean_forward_runs_once_per_batch_not_once_per_config(setup):
-    """clean forward가 구성 수만큼 반복되면 안 된다 — 이 루프 순서가 비용의 대부분이다."""
+def test_full_forward_runs_once_per_batch_regardless_of_config_count(setup):
+    """전체 forward 는 캐시할 때 배치당 딱 1회여야 한다.
+
+    예전에는 배치당 (1 + 구성 수)번 전체 forward 를 돌았고, 그중 blocks[0..target_block]
+    은 구성 수만큼 같은 값을 다시 계산하는 낭비였다. 캐시+꼬리로 바꾼 뒤에는 개입이
+    run_vit_tail 만 타므로 model.forward 를 건드리지 않는다."""
     model, sae, stats, ds = setup
     specs = {("color", "cue"): [0], ("color", "random_0"): [1], ("shape", "cue"): [2]}
     alphas = [0.0, 0.5, 1.0]
     n_batches = 2
     model.clean_forwards = 0
     evaluate_latent_intervention_curve(model, sae, stats, specs, _loader(ds, 4), 0, "cpu", alphas=alphas, label_to_imagenet=None)
-    n_configs = len(specs) * len(alphas)
-    # 배치당 clean 1회 + 구성 수만큼 개입 forward(개입도 model()을 통과한다)
-    assert model.clean_forwards == n_batches * (1 + n_configs)
+    assert model.clean_forwards == n_batches, (
+        f"구성 {len(specs) * len(alphas)}개인데 전체 forward 가 {model.clean_forwards}회 — "
+        "캐시가 안 먹고 구성마다 앞부분을 다시 돌고 있다"
+    )
 
 
 def test_max_batches_truncates(setup):

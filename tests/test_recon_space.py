@@ -43,7 +43,7 @@ def _cfg(recon_space="raw"):
 def _step(sae, xb, cfg, token_std):
     opt = torch.optim.Adam(sae.parameters(), lr=0.0)  # lr=0 이라 손실 계산만 본다
     scaler = U._make_grad_scaler("cpu", False, torch.float32)
-    _loss, recon, _l1, _xh, _z = _run_sae_step(sae, opt, xb, scaler, cfg.sae, cfg.optim_config, "cpu", None, token_std)
+    _loss, recon, _l1, _xh, _z, _ghost = _run_sae_step(sae, opt, xb, scaler, cfg.sae, cfg.optim_config, "cpu", None, token_std)
     return float(recon.item())
 
 
@@ -136,15 +136,18 @@ def test_l0_metrics_are_unaffected_by_recon_space():
         assert a[k] == pytest.approx(b[k])
 
 
-def test_every_run_sae_step_call_site_passes_token_std():
-    """호출 지점이 하나라도 빠지면 그 경로만 조용히 norm 손실로 학습된다.
+def test_every_run_sae_step_call_site_passes_token_std_and_dead_tracker():
+    """호출 지점이 하나라도 빠지면 그 경로만 조용히 다르게 학습된다.
 
-    예전에 warmup scheduler를 3곳 중 2곳에만 붙여서 실제로 쓰이던 경로가 누락된 적이 있다."""
+    token_std가 빠지면 그 경로만 norm 손실로 학습되고, dead_tracker가 빠지면 그 경로만
+    ghost grad 없이 학습된다. 예전에 warmup scheduler를 3곳 중 2곳에만 붙여서 실제로
+    쓰이던 경로가 누락된 적이 있다."""
     src = inspect.getsource(U)
     calls = [ln for ln in src.splitlines() if "config.sae, config.optim_config, device, scheduler" in ln]
     assert len(calls) == 4, f"_run_sae_step 호출이 4곳이어야 한다: {len(calls)}"
     for ln in calls:
-        assert ln.rstrip().endswith("token_std"), f"token_std 누락: {ln.strip()}"
+        assert "token_std" in ln, f"token_std 누락: {ln.strip()}"
+        assert ln.rstrip().endswith("dead_tracker"), f"dead_tracker 누락: {ln.strip()}"
 
 
 class _Blk(nn.Module):

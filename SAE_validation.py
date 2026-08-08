@@ -35,7 +35,7 @@ from Utils.SAE_utils import (
     fit_token_normalizer_streaming,
     get_torch_dtype,
     jsonable,
-    normalize_tokens_inplace,
+    normalize_tokens_chunked,
     save_json,
     train_sae_auto,
 )
@@ -52,7 +52,7 @@ OUTPUT_ROOT = "outputs/SAE_validation"
 # trial 재사용은 trial_NNNN 디렉터리 이름만 보고 판정한다(override 값은 안 본다). grid를
 # 바꿀 때 이 이름을 그대로 두면 이전 grid의 완료된 trial_0000이 새 override 라벨을 달고
 # 재사용된다 — 조용히 틀린 결과가 나온다. GRID_SPACE를 바꾸면 여기도 반드시 바꾼다.
-GRID_DIR_NAME = "grid_raw_loss"
+GRID_DIR_NAME = "grid_search"
 
 # Dataset / backbone
 # "imagenet" = HF 캐시(data/hf_cache)의 ImageNet-1k, 1000 클래스. PatchSAE와 같은 학습 분포다.
@@ -65,21 +65,36 @@ VAL_SPLIT = "val"
 MODEL_NAME = "vit_base_patch16_224"
 PRETRAINED = True
 TARGET_BLOCK = 10
-TOKEN_SCOPE = "all"  # "cls", "patch", "all"
+TOKEN_SCOPE = "patch"  # "cls", "patch", "all"
 
 # Dataloader / token extraction
 DATALOADER_BATCH_SIZE = 64
 DATALOADER_NUM_WORKERS = 12
 DATALOADER_PIN_MEMORY = True
 MAX_TRAIN_TOKENS = 1_000_000
-# ImageNet-1k val은 5만 장(= 약 980만 토큰)이라 None으로 두면 검증 토큰 캐시가 15 GB를 넘는다.
-# imagenette val 전체(약 77만 토큰)와 같은 자릿수로 맞춰 상한을 둔다.
-MAX_VAL_TOKENS = 800_000
+# ImageNet-1k val은 5만 장 x 196 = 980만 토큰이다. 그 절반인 490만(= 25,000장)을 쓴다.
+# 이전 값 80만(4,082장 / 전체의 8.2%)에서 올렸다 — 클래스 커버리지는 그때도 989/1000으로
+# 나쁘지 않았지만, trial 간·실행 간 비교의 절대 수준 신뢰도를 올리기 위한 것이다.
+#
+# 주의: 회차 간 val_nmse 흔들림(실측 1.9%)은 이걸 늘려도 안 줄어든다. 검증셋이 고정이라
+# 표본 잡음이 아니라 파라미터가 실제로 움직여서 나는 값이기 때문이다(→ lr 스케줄 문제).
+#
+# 메모리: 490만 x 768 x 2B(fp16) = 7.0 GiB. normalize를 청크로 돌려 fp16 저장을 유지한다
+# (Utils/SAE_utils.normalize_tokens_chunked). fp32로 통째 올리면 21 GiB 피크라 터진다.
+MAX_VAL_TOKENS = 4_900_000
 # 정규화 통계 / b_dec 초기화용 상한. 학습 예산과 분리한다 — 통계적으로는 부분표본이면
 # 충분한데, b_dec는 Weiszfeld 반복마다 ViT 전체 패스를 다시 돌아서 여기가 커지면
 # 준비 단계가 학습보다 오래 걸린다. None이면 MAX_TRAIN_TOKENS를 따른다.
 MAX_NORMALIZER_TOKENS = 2_000_000
 MAX_BDEC_TOKENS = 500_000
+# 활성 정규화 규약. "scalar"가 기본이다 — 차원별 나눗셈은 축마다 배율이 달라
+# raw 공간의 방향을 뒤트는데, 실측 std 범위가 1.38~12.16(8.8배)이라 왜곡이 작지 않다.
+# SAE가 찾는 게 활성 공간의 '방향'(개념)이므로 축을 제각기 늘리면 안 된다.
+# 중심화(평균 빼기)는 두 모드 모두 차원별로 한다 — 평행이동이라 기하를 보존한다.
+#
+# Anthropic/SAELens/OpenAI TopK와 같은 규약이라 외부 수치와 비교가 깨끗해진다.
+# 이전 실행들은 전부 "per_dim"이므로 그것들과 직접 비교하려면 여기를 되돌린다.
+TOKEN_NORM_MODE = "scalar"  # "scalar" | "per_dim"
 TOKEN_SOURCE_MODE = "auto"  # "auto", "cache", "stream"
 TOKEN_CACHE_DTYPE = "float16"
 TOKEN_CACHE_MAX_CPU_GIB = 8.0
@@ -93,14 +108,28 @@ TOKEN_CACHE_MAX_CPU_GIB = 8.0
 #                    이 모드에서는 EPOCHS와 MAX_TRAIN_TOKENS를 안 쓴다.
 TRAIN_SCHEDULE_MODE = "token_budget"  # "epoch", "token_budget"
 TOTAL_TRAIN_TOKENS = 502_217_464
-# 검증 1회는 실측 11.1초다(val 토큰 80만, hidden 49152). 200스텝마다면 354회 = 66분으로
-# trial 1개(3.5시간)의 31%를 검증에 쓴다. 1000으로 하면 71회 = 13분이다.
+# 검증 1회 비용은 val 토큰 수에 비례한다 — 실측 80만 토큰 = 11.1초이므로 490만이면 약 68초다.
+# MAX_VAL_TOKENS를 6배로 올렸으니 검증 빈도를 절반으로 낮춰 총 검증 비용을 맞춘다:
+#   1000 스텝마다 -> 70회 x 68초 = 79분/trial  (trial 1개의 28%)
+#   2000 스텝마다 -> 35회 x 68초 = 40분/trial  (trial 1개의 14%)
 # EARLY_STOPPING_PATIENCE는 "검증 횟수"로 세므로 이 값과 함께 움직여야 한다 — 아래 참조.
-EVAL_EVERY_STEPS = 1000
+EVAL_EVERY_STEPS = 1500
 EPOCHS = 120
 # PatchSAE 참조 구현 기본값(lr 4e-4 + constant-with-warmup 500 step). 이전 값은 1e-4 / warmup 없음.
 SAE_LR = 4e-4
 SAE_LR_WARMUP_STEPS = 500
+# 후반부 lr 감쇠. PatchSAE는 warmup 뒤 끝까지 고정인데, 그러면 분지에 들어간 뒤에도
+# 갱신 폭이 그대로라 파라미터가 최소점 주변을 계속 배회한다.
+#
+# 실측 근거(2026-08-07, grid_search): 고정 검증셋에서 재는 val_nmse가 회차마다
+# 1.2~1.9% 흔들렸다. 검증셋이 고정이고 평가가 결정적이므로 표본 잡음이 아니라
+# 전부 파라미터 이동이다. 평탄구간 전체 개선폭이 회차간 표준편차의 1.2~1.7배에
+# 그쳐서, 체크포인트 선정이 사실상 운으로 결정됐다:
+#   trial_0000: is_best 가 ev1~9 에서만 켜지고 나머지 62 eval 은 한 번도 갱신 못 함
+#   trial_0001: ev32 이후 19 eval 연속 무개선
+SAE_LR_DECAY = "cosine"        # "none" | "linear" | "cosine"
+SAE_LR_DECAY_START_FRAC = 0.6  # 마지막 40% 구간에서만 줄인다
+SAE_LR_FINAL_FRAC = 0.0        # 끝에서 정확히 0
 SAE_WEIGHT_DECAY = 0.0
 EXPANSION = 64
 B_DEC_INIT_MODE = "geom"  # "zero", "mean", "geom"
@@ -124,6 +153,37 @@ MODEL_COMPILE = True
 # 약해진다. 같은 L0를 유지하려면 L1_REG를 대략 3배 올려야 한다.
 SAE_RECON_SPACE = "raw"
 
+# --- ghost gradients (PatchSAE src/sae_training/sparse_autoencoder.py 이식) ---
+# 죽은 latent만 골라 ReLU 대신 exp()를 태워 재구성 잔차를 설명하게 한다. exp()는
+# pre-activation이 음수여도 기울기가 0이 아니라서 ReLU+L1의 흡수 상태를 빠져나온다.
+#
+# 켜는 근거: trial_0000의 dead_latent_frac이 64.8%(z>0.2) / 61.9%(z>0)로 나와,
+# 합의한 판정 기준(40% 초과면 구조 변경)을 넘겼다. TopK 전환 전에 더 가벼운 수단을
+# 먼저 시도한다.
+#
+# 실측 A/B (2026-08-07, trial_0000 체크포인트에서 이어 400스텝, window=0):
+#   ghost ON  — 미발화 latent 33,330 -> 24,054(50스텝) -> 27,818(400스텝)
+#   ghost OFF — 33,297 -> 33,158 -> 33,165 (내내 평평)
+# 부활은 확실히 일어나지만 L1이 다시 죽여서 일부만 유지된다. 위 테스트는 window=0이라
+# 아래 운용값(1000)보다 훨씬 공격적이었다는 점을 감안할 것.
+#
+# 비용: SAE 스텝만 보면 2.82x, ViT forward까지 포함한 실제 벽시계로는 1.52x.
+SAE_USE_GHOST_GRADS = True
+# PatchSAE 기본값과 동일. 이 스텝 수 동안 한 번도 발화하지 않으면 dead로 본다.
+SAE_DEAD_FEATURE_WINDOW = 1000
+# PatchSAE 기본값과 동일(사실상 z>0). 보고용 active_threshold(0.2)와 별개다.
+SAE_DEAD_FEATURE_THRESHOLD = 1e-8
+# ghost 항에 쓸 배치 행 수. None이면 배치 전체이고 그게 PatchSAE와 같다.
+#
+# 2048은 **의도적인 이탈**이다. 배치 7096의 29%만 ghost에 쓴다. 속도 손잡이지 VRAM
+# 손잡이가 아니라서(실측 peak 5.79 GiB로 rows와 무관) 얻는 건 시간뿐이다:
+#   None -> 306 ms/step (SAE 스텝 2.82x), 트라이얼당 약 5시간 50분
+#   2048 -> 175 ms/step (SAE 스텝 1.61x), 트라이얼당 약 4시간 40분
+# 기울기가 닿는 latent 집합은 rows와 무관하게 같고 추정 표본만 줄어든다
+# (tests/test_ghost_grads.py::test_max_rows_subsamples_without_changing_which_latents_get_gradient).
+# PatchSAE와 엄밀히 대조하려면 None으로 되돌릴 것.
+SAE_GHOST_GRAD_MAX_ROWS = 2048
+
 # AMP / safety checks
 USE_AMP = torch.cuda.is_available()
 SAE_AMP_DTYPE = "bfloat16"
@@ -135,8 +195,8 @@ MATMUL_PRECISION = "high"
 # 예산으로 돌리고 조기 종료가 없다.
 #
 # 왜 껐나: patience는 val_nmse만 보는데, 학습 중 SAE는 "nmse는 평평한 채 L0만 하강"하는
-# 구간을 길게 지난다. val_nmse의 노이즈가 +-0.001인 데 반해 EARLY_STOPPING_EPS는 5e-5로
-# 20배 작아서, 개선이 노이즈에 묻히면 patience가 그 하강 도중에 걸려버린다. 실측(2026-08-06
+# 구간을 길게 지난다. val_nmse의 노이즈가 +-0.001인 데 반해 EARLY_STOPPING_EPS가 5e-5라
+# 20배 작았고, 개선이 노이즈에 묻히면 patience가 그 하강 도중에 걸려버렸다. 실측(2026-08-06
 # grid_lambda_low)에서 세 trial이 예산의 57% / 18% / 33% 지점에서 멈췄고 셋 다 멈추는
 # 순간까지 active가 단조 감소 중이었다 — 평형에 도달한 trial이 하나도 없었다. 그 탓에
 # l0_raw가 lambda에 대해 비단조로 나왔다(422 / 575 / 176). lambda의 성질이 아니라 각
@@ -145,7 +205,16 @@ MATMUL_PRECISION = "high"
 # patience=None이어도 best checkpoint 선정(L0 제약 하)은 그대로 돈다 — 조기 종료 카운팅과
 # 체크포인트 선정은 분리돼 있다(Utils/early_stopping.py).
 EARLY_STOPPING_PATIENCE = None
-EARLY_STOPPING_EPS = 5e-5
+# 노이즈 스케일로 맞춘다. eps는 두 곳에서 "같다"의 기준으로 쓰인다:
+#   (1) patience의 개선 판정        — tier_score < best - eps
+#   (2) 체크포인트 동점 판정        — |tier_score - lowest| <= eps 면 active가 적은 쪽을 남긴다
+# 5e-5는 val_nmse 노이즈(+-0.001)의 1/20이라 (2)가 사실상 절대 참이 안 됐다. 그래서 "동점이면
+# 더 희소한 쪽" 규칙이 죽어 있었고, best는 그냥 가장 낮게 찍힌 노이즈 draw가 됐다. 실측
+# (2026-08-07 grid_raw_loss/trial_0000): eval 9의 nmse=0.0850/active=188.08이 끝까지 best로
+# 남고, 그보다 훨씬 희소한 eval 62(nmse=0.0852/active=139.29)가 0.0002 차이로 계속 밀렸다.
+# 1e-3이면 그 창 안에서 희소한 쪽으로 단조 이동한다. 창의 기준점은 lowest_score(지금까지의
+# 최소)라 accept될 때마다 떠내려가지 않는다 — Utils/early_stopping.py:139.
+EARLY_STOPPING_EPS = 1e-3
 EARLY_STOPPING_VERBOSE = False
 
 # Grid search
@@ -189,7 +258,7 @@ SPARSITY_L0_MAX = 800.0
 # 그건 의도한 것이다 — 이번 grid의 목적은 제약 안에서 고르는 게 아니라 희소성/재구성
 # 트레이드오프 곡선을 세 점으로 재는 것이다. l0_max는 폭주 방지용으로만 남는다.
 GRID_SPACE = {
-    "sae.l1_reg": [1.8e-3, 2.55e-3, 3.6e-3],
+    "sae.l1_reg": [3.6e-3, 2.4e-3, 1.5e-3, 1.0e-3, 0.6e-3, 0.3e-3,],
 }
 _UNUSED_GRID_SPACE_FULL = {
     "sae.expansion": [16, 32, 64],
@@ -255,6 +324,7 @@ def build_default_config():
     config.schedule.mode = TRAIN_SCHEDULE_MODE
     config.schedule.total_train_tokens = TOTAL_TRAIN_TOKENS
     config.schedule.eval_every_steps = EVAL_EVERY_STEPS
+    config.token.norm_mode = TOKEN_NORM_MODE
     config.token.source_mode = TOKEN_SOURCE_MODE
     config.token.cache_dtype = TOKEN_CACHE_DTYPE
     config.token.cache_max_cpu_gib = TOKEN_CACHE_MAX_CPU_GIB
@@ -262,6 +332,9 @@ def build_default_config():
     config.optim_config.epochs = EPOCHS
     config.optim_config.lr = SAE_LR
     config.optim_config.lr_warmup_steps = SAE_LR_WARMUP_STEPS
+    config.optim_config.lr_decay = SAE_LR_DECAY
+    config.optim_config.lr_decay_start_frac = SAE_LR_DECAY_START_FRAC
+    config.optim_config.lr_final_frac = SAE_LR_FINAL_FRAC
     config.optim_config.weight_decay = SAE_WEIGHT_DECAY
     config.optim_config.use_amp = USE_AMP
 
@@ -276,6 +349,10 @@ def build_default_config():
     config.sae.check_finite = SAE_CHECK_FINITE
     config.sae.matmul_precision = MATMUL_PRECISION
     config.sae.recon_space = SAE_RECON_SPACE
+    config.sae.use_ghost_grads = SAE_USE_GHOST_GRADS
+    config.sae.dead_feature_window = SAE_DEAD_FEATURE_WINDOW
+    config.sae.dead_feature_threshold = SAE_DEAD_FEATURE_THRESHOLD
+    config.sae.ghost_grad_max_rows = SAE_GHOST_GRAD_MAX_ROWS
 
     config.early_stopping.patience = EARLY_STOPPING_PATIENCE
     config.early_stopping.eps = EARLY_STOPPING_EPS
@@ -451,8 +528,12 @@ def run_sae_trial(config, trial_dir, trial_id=None):
         target_block=config.hook.target_block,
         token_scope=config.hook.token_scope,
         device=config.extraction_config.device,
+        norm_mode=config.token.norm_mode,
     )
-    print(f"train tokens seen for normalizer: {train_token_count:,}")
+    print(
+        f"train tokens seen for normalizer: {train_token_count:,} "
+        f"(norm_mode={config.token.norm_mode}, std {token_stats['std'].min():.4f}~{token_stats['std'].max():.4f})"
+    )
 
     print("\nFitting b_dec init from the same train-token stream...")
     b_dec_init = compute_b_dec_init_streaming(
@@ -478,8 +559,13 @@ def run_sae_trial(config, trial_dir, trial_id=None):
         cache_dtype=get_torch_dtype(config.token.cache_dtype),
         return_labels=True,
     )
-    val_tokens = normalize_tokens_inplace(val_tokens.float(), token_stats)
-    print(f"val tokens cached: {tuple(val_tokens.shape)}")
+    # .float()로 통째 올리면 원본(fp16)과 사본(fp32)이 동시에 살아 490만 토큰 기준
+    # 21 GiB 피크가 난다. 청크만 fp32로 올려 계산하고 저장 dtype은 유지한다.
+    val_tokens = normalize_tokens_chunked(val_tokens, token_stats, config.token.normalize_chunk_size)
+    print(
+        f"val tokens cached: {tuple(val_tokens.shape)} {val_tokens.dtype} "
+        f"({val_tokens.numel() * val_tokens.element_size() / 2**30:.2f} GiB)"
+    )
 
     input_dim = int(token_stats["mean"].shape[1])
     hidden_dim = int(input_dim * config.sae.expansion)

@@ -16,9 +16,12 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from Utils.SAE_utils import (
+    TQDM_KW,
     collect_tokens_with_hook,
+    get_torch_dtype,
     latent_frequency,
     normalize_tokens,
+    normalize_tokens_chunked,
     normalize_tokens_inplace,
     plot_sae_training_history,
 )
@@ -56,7 +59,16 @@ INTERVENTION_BATCH_SIZE = 1
 # 416 -> 593 img/s(측정, hidden 49152)로 오르고 그 위로는 평평하다. 피크 VRAM은 0.43 -> 0.64 GiB.
 INTERVENTION_SAE_CHUNK_SIZE = 512
 INTERVENTION_MAX_BATCHES = None
+# **폴백값이다.** 실제로는 config.hook.token_scope 를 따라간다(save_trial_plots 가 넘긴다).
+#
+# 예전엔 이게 모듈 상수로 박혀 "all" 이었다. 그러면 SAE 를 patch 토큰으로만 학습해놓고
+# 진단에서는 CLS 까지 SAE 재구성으로 갈아끼우게 된다 — 학습 중 한 번도 본 적 없는 분포에
+# 대한 재구성이 하필 분류 head 가 pooling 해서 쓰는 토큰 자리에 들어간다. 개입과 무관한
+# 재구성 대가가 얹혀 cue 효과의 신호 대 잡음을 실제보다 나쁘게 보이게 한다.
 INTERVENTION_TOKEN_SCOPE = "all"
+# 캐시된 활성을 꼬리에 태울 때 한 번에 올릴 이미지 수. 캐시 자체는 CPU 에 있고 이 청크만
+# GPU 로 올라간다 — 64장 x 197토큰 x 768 fp32 = 37 MiB 라 SAE 인코딩 쪽이 지배적이다.
+INTERVENTION_TAIL_CHUNK_IMAGES = 64
 PERTURBATION_FAMILY_NAMES = {
     "grayscale": "color_latents",
     "blur": "texture_latents",
@@ -819,24 +831,34 @@ def reconstruct_tokens_with_latent_scaling(tokens, sae, token_stats, latent_ids,
 
 
 @torch.no_grad()
+def _edit_block_output(block_output, sae, token_stats, latent_ids, alpha, intervention_token_scope):
+    """블록 출력에 latent 개입을 적용한 텐서를 돌려준다.
+
+    훅 경로(run_model_with_latent_intervention)와 캐시 경로(evaluate_latent_intervention_curve)가
+    **같은 함수를 쓰도록** 뽑아낸 것이다. 두 곳에 복붙해두면 한쪽만 고쳐져 조용히 갈라진다."""
+    edited = block_output.detach().clone()
+    if intervention_token_scope == "cls":
+        edited[:, :1, :] = reconstruct_tokens_with_latent_scaling(block_output[:, :1, :], sae, token_stats, latent_ids, alpha)
+    elif intervention_token_scope == "patch":
+        edited[:, 1:, :] = reconstruct_tokens_with_latent_scaling(block_output[:, 1:, :], sae, token_stats, latent_ids, alpha)
+    elif intervention_token_scope in {"all", "clspatch"}:
+        edited = reconstruct_tokens_with_latent_scaling(block_output, sae, token_stats, latent_ids, alpha)
+    else:
+        raise ValueError(f"Unknown intervention_token_scope: {intervention_token_scope}")
+    return edited
+
+
 def run_model_with_latent_intervention(images, latent_ids, alpha, model, sae, token_stats, target_block, intervention_token_scope, device):
+    """전체 forward 에 훅을 걸어 개입하는 경로(구 구현).
+
+    evaluate_latent_intervention_curve 는 이제 캐시+꼬리 경로를 쓰므로 이걸 부르지 않는다.
+    다만 **두 경로가 같은 값을 내는지 검증하는 기준 구현**으로 남겨둔다
+    (tests/test_intervention_cache.py)."""
     device = torch.device(device)
 
     def hook(_module, _inputs, output):
-        if isinstance(output, (tuple, list)):
-            block_output = output[0]
-        else:
-            block_output = output
-        edited = block_output.detach().clone()
-        if intervention_token_scope == "cls":
-            edited[:, :1, :] = reconstruct_tokens_with_latent_scaling(block_output[:, :1, :], sae, token_stats, latent_ids, alpha)
-        elif intervention_token_scope == "patch":
-            edited[:, 1:, :] = reconstruct_tokens_with_latent_scaling(block_output[:, 1:, :], sae, token_stats, latent_ids, alpha)
-        elif intervention_token_scope in {"all", "clspatch"}:
-            edited = reconstruct_tokens_with_latent_scaling(block_output, sae, token_stats, latent_ids, alpha)
-        else:
-            raise ValueError(f"Unknown intervention_token_scope: {intervention_token_scope}")
-        return edited
+        block_output = output[0] if isinstance(output, (tuple, list)) else output
+        return _edit_block_output(block_output, sae, token_stats, latent_ids, alpha, intervention_token_scope)
 
     model.eval().to(device)
     sae.eval().to(device)
@@ -849,48 +871,125 @@ def run_model_with_latent_intervention(images, latent_ids, alpha, model, sae, to
 
 
 @torch.no_grad()
-def evaluate_latent_intervention_curve(model, sae, token_stats, specs, loader, target_block, device, alphas=INTERVENTION_ALPHA_VALUES, max_batches=INTERVENTION_MAX_BATCHES, label_to_imagenet=IMAGENETTE_TO_IMAGENET_IDX):
-    """(spec x alpha) 구성마다 clean 대비 개입 후 logit 변화를 집계한다.
+def cache_block_activations(model, loader, target_block, device, max_batches=None, cache_dtype=torch.float16):
+    """블록 target_block 의 출력을 한 번만 계산해 CPU 에 쌓는다.
 
-    이미지 루프가 바깥에 있다 — clean forward와 이미지 디코딩은 spec/alpha와 무관하므로
-    구성 수(기본 15 x 7 = 105)만큼 반복하면 그만큼 낭비다. 배치 하나를 읽어서 clean을 한 번만
-    돌리고, 그 배치에 대해 모든 구성의 개입 forward를 돌린다. 결과 record의 순서와 값은
-    구성별 루프가 바깥이던 때와 같다(합산은 배치 단위 가중 평균이라 순서에 무관)."""
+    개입 구성이 105개면 예전 구조는 blocks[0..target_block] 을 105번 똑같이 다시 돌았다.
+    그 앞부분은 개입과 무관하므로(훅이 target_block 출력을 갈아끼운다) 한 번만 계산해
+    캐시하면 된다.
+
+    fp16 으로 담는다 — 2,000장 x 197토큰 x 768 = 0.59 GiB. fp32 면 1.2 GiB 다."""
     device = torch.device(device)
     model.eval().to(device)
+    captured = {}
+
+    def hook(_module, _inputs, output):
+        captured["h"] = (output[0] if isinstance(output, (tuple, list)) else output).detach()
+
+    handle = model.blocks[target_block].register_forward_hook(hook)
+    chunks, label_chunks = [], []
+    try:
+        # 제너레이터로 넘어오는 loader 도 있어 len()을 가정하지 않는다(tqdm total 용도뿐).
+        try:
+            n_batches = len(loader)
+        except TypeError:
+            n_batches = None
+        if n_batches is not None and max_batches is not None:
+            n_batches = min(n_batches, int(max_batches))
+        for batch_idx, (images, labels) in enumerate(
+            tqdm(loader, total=n_batches, desc="caching block activations", leave=False, **TQDM_KW)
+        ):
+            if max_batches is not None and batch_idx >= int(max_batches):
+                break
+            captured.clear()
+            model(images.to(device))
+            chunks.append(captured["h"].to(cache_dtype).cpu())
+            label_chunks.append(labels.detach().cpu().long())
+    finally:
+        handle.remove()
+    if not chunks:
+        raise RuntimeError("개입 진단용 활성이 하나도 안 모였다 — loader 가 비어 있는지 확인할 것.")
+    return torch.cat(chunks, dim=0), torch.cat(label_chunks, dim=0)
+
+
+@torch.no_grad()
+def run_vit_tail(model, h, target_block):
+    """블록 target_block 출력을 받아 남은 꼬리만 돌려 logits 를 낸다.
+
+    Model/intervention.py 의 경로와 같은 순서다: 남은 블록 -> norm -> forward_head -> head."""
+    for blk in model.blocks[target_block + 1 :]:
+        h = blk(h)
+    h = model.norm(h)
+    return model.head(model.forward_head(h, pre_logits=True))
+
+
+@torch.no_grad()
+def evaluate_latent_intervention_curve(model, sae, token_stats, specs, loader, target_block, device, alphas=INTERVENTION_ALPHA_VALUES, max_batches=INTERVENTION_MAX_BATCHES, label_to_imagenet=IMAGENETTE_TO_IMAGENET_IDX, chunk_images=INTERVENTION_TAIL_CHUNK_IMAGES, token_scope=None):
+    """(spec x alpha) 구성마다 clean 대비 개입 후 logit 변화를 집계한다.
+
+    **캐시 후 스트리밍** 구조다:
+      1) blocks[0..target_block] 을 한 번만 돌려 활성을 CPU 에 캐시한다.
+      2) clean logits 는 그 캐시에 꼬리만 태워서 얻는다(전체 forward 와 동일한 계산).
+      3) 구성마다 캐시를 청크로 흘리며 개입 -> 꼬리만 재실행한다.
+
+    예전에는 배치마다 clean 1회 + 개입 105회 = 106번의 **전체** ViT forward 를 돌았고,
+    그중 blocks[0..10] 은 105번이 전부 같은 값을 다시 계산하는 낭비였다. 지금은 앞부분이
+    딱 1회다 — ViT-B/16 에서 개입 경로의 forward 비용이 약 1/12 로 줄어든다.
+
+    결과 record 의 스키마·값은 이전과 같다(합산이 이미지 단위 가중 평균이라 순회 순서에 무관)."""
+    device = torch.device(device)
+    model.eval().to(device)
+    sae.eval().to(device)
+    # SAE 가 학습한 토큰 범위와 개입 범위를 일치시킨다. None 이면 모듈 폴백을 쓴다.
+    scope = str(token_scope or INTERVENTION_TOKEN_SCOPE)
 
     keys = [(family, baseline, float(alpha)) for (family, baseline) in specs for alpha in alphas]
     acc = {k: {"js": 0.0, "ce": 0.0, "logit_l1": 0.0, "int_acc": 0.0, "clean_acc": 0.0, "rows": 0} for k in keys}
 
-    n_batches = len(loader) if max_batches is None else min(len(loader), int(max_batches))
-    for batch_idx, (images, labels) in enumerate(tqdm(loader, total=n_batches, desc=f"latent intervention curve [{INTERVENTION_TOKEN_SCOPE}] x{len(keys)}", leave=False)):
-        if max_batches is not None and batch_idx >= int(max_batches):
-            break
-        images = images.to(device)
-        n = images.shape[0]
-        labels_cpu = labels.detach().cpu().long()
-        labels_imagenet = labels_cpu if label_to_imagenet is None else label_to_imagenet[labels_cpu]
+    h_cache, labels_cpu = cache_block_activations(model, loader, target_block, device, max_batches=max_batches)
+    labels_imagenet = labels_cpu if label_to_imagenet is None else label_to_imagenet[labels_cpu]
+    n_images = int(h_cache.shape[0])
+    step = max(1, int(chunk_images))
+    print(
+        f"intervention cache: {tuple(h_cache.shape)} {h_cache.dtype} "
+        f"({h_cache.numel() * h_cache.element_size() / 2**30:.2f} GiB), "
+        f"tail-only forward x {len(keys)} configs, token_scope={scope}"
+    )
 
-        clean_logits = model(images).detach().cpu()
-        clean_logp = F.log_softmax(clean_logits, dim=1)
-        clean_prob = clean_logp.exp()
-        clean_acc = (clean_logits.argmax(dim=1) == labels_imagenet).float().mean().item()
+    # clean 은 캐시에 꼬리만 태운다 — 전체 forward 와 같은 계산이라 값이 동일하다.
+    clean_logits = torch.cat(
+        [run_vit_tail(model, h_cache[s : s + step].float().to(device), target_block).detach().cpu()
+         for s in range(0, n_images, step)],
+        dim=0,
+    )
+    clean_logp = F.log_softmax(clean_logits, dim=1)
+    clean_prob = clean_logp.exp()
 
-        for (family, baseline), latent_ids in specs.items():
-            for alpha in alphas:
-                int_logits = run_model_with_latent_intervention(images, latent_ids, alpha, model, sae, token_stats, target_block, INTERVENTION_TOKEN_SCOPE, device)
+    for (family, baseline), latent_ids in tqdm(
+        list(specs.items()), desc=f"latent intervention curve [{scope}]", leave=False, **TQDM_KW
+    ):
+        for alpha in alphas:
+            for s in range(0, n_images, step):
+                e = min(n_images, s + step)
+                h = h_cache[s:e].float().to(device)
+                edited = _edit_block_output(h, sae, token_stats, latent_ids, alpha, scope)
+                int_logits = run_vit_tail(model, edited, target_block).detach().cpu()
+                del h, edited
+
+                n = e - s
+                y = labels_imagenet[s:e]
+                cl_logits, cl_logp, cl_prob = clean_logits[s:e], clean_logp[s:e], clean_prob[s:e]
                 int_logp = F.log_softmax(int_logits, dim=1)
-                m = 0.5 * (clean_prob + int_logp.exp()).clamp_min(1e-12)
-                js = 0.5 * (F.kl_div(clean_logp, m, reduction="batchmean") + F.kl_div(int_logp, m, reduction="batchmean"))
-                ce = F.cross_entropy(int_logits, labels_imagenet)
-                intervention_acc = (int_logits.argmax(dim=1) == labels_imagenet).float().mean().item()
+                m = 0.5 * (cl_prob + int_logp.exp()).clamp_min(1e-12)
+                js = 0.5 * (F.kl_div(cl_logp, m, reduction="batchmean") + F.kl_div(int_logp, m, reduction="batchmean"))
+                ce = F.cross_entropy(int_logits, y)
 
                 a = acc[(family, baseline, float(alpha))]
                 a["js"] += float(js.item()) * n
                 a["ce"] += float(ce.item()) * n
-                a["logit_l1"] += float((int_logits - clean_logits).abs().mean(dim=1).sum().item())
-                a["int_acc"] += intervention_acc * n
-                a["clean_acc"] += clean_acc * n
+                a["logit_l1"] += float((int_logits - cl_logits).abs().mean(dim=1).sum().item())
+                a["int_acc"] += float((int_logits.argmax(dim=1) == y).float().sum().item())
+                a["clean_acc"] += float((cl_logits.argmax(dim=1) == y).float().sum().item())
                 a["rows"] += n
 
     records = []
@@ -952,18 +1051,25 @@ def save_trial_plots(trial_dir, model, train_history, sae, token_stats, val_toke
     fig = plot_sae_training_history(train_history, hidden_dim=_hidden_dim(sae), active_threshold=config.sae.active_threshold)
     save_plot(fig, plots_dir, "sae_train_log", dpi=config.output.plot_dpi)
 
-    label_entropy_loader, _ = make_balanced_label_entropy_loader(val_dataset, max_tokens=config.token.max_val_tokens, token_scope=config.hook.token_scope, batch_size=config.data_config.batch_size)
+    # 이 히스토그램은 val_tokens 와 **별개로 토큰을 한 벌 더** 모은다. max_val_tokens 를
+    # 그대로 쓰면 490만 x 768 x fp32 = 14 GiB 를 잡고, 상주 중인 val_tokens 7 GiB 와 합쳐
+    # 21 GiB 가 되어 진단 단계에서 OOM 으로 죽는다(2026-08-07 실측, exit 137).
+    # 발화 히스토그램용이라 검증 지표만큼 표본이 필요 없으므로 별도 상한을 쓴다.
+    latent_stats_tokens = getattr(config.token, "max_latent_stats_tokens", None) or config.token.max_val_tokens
+    label_entropy_loader, _ = make_balanced_label_entropy_loader(val_dataset, max_tokens=latent_stats_tokens, token_scope=config.hook.token_scope, batch_size=config.data_config.batch_size)
     entropy_tokens, entropy_labels = collect_tokens_with_hook(
         model,
         label_entropy_loader,
-        config.token.max_val_tokens,
+        latent_stats_tokens,
         config.hook.target_block,
         config.hook.token_scope,
         config.extraction_config.device,
-        cache_dtype=None,
+        cache_dtype=get_torch_dtype(config.token.cache_dtype),
         return_labels=True,
     )
-    entropy_tokens = normalize_tokens_inplace(entropy_tokens.float(), token_stats)
+    # 청크만 fp32 로 올려 정규화하고 저장 dtype(fp16)은 유지한다. summarize_sae_latents 가
+    # 청크마다 .float() 로 올려 쓰므로 그대로 동작한다.
+    entropy_tokens = normalize_tokens_chunked(entropy_tokens, token_stats, config.token.normalize_chunk_size)
     sae_latent_stats = summarize_sae_latents(sae, entropy_tokens, labels=entropy_labels, batch_size=config.sae.batch_size, thresholds=(0.0, 1e-3, 1e-2, 0.1, config.sae.active_threshold))
     fig = plot_sae_latent_stats(sae_latent_stats, active_threshold=config.sae.active_threshold, title=f"SAE for {config.hook.token_scope} token only")
     save_plot(fig, plots_dir, "sae_latent_stats_log", dpi=config.output.plot_dpi)
@@ -1038,6 +1144,10 @@ def save_trial_plots(trial_dir, model, train_history, sae, token_stats, val_toke
         config.hook.target_block,
         config.extraction_config.device,
         alphas=alphas,
+        # SAE 가 학습한 토큰 범위와 개입 범위를 맞춘다. patch 로 학습해놓고 "all" 로 개입하면
+        # 학습에서 본 적 없는 CLS 자리까지 재구성으로 갈아끼우게 되고, 그 토큰이 하필
+        # 분류 head 가 pooling 해서 쓰는 것이라 개입과 무관한 대가가 얹힌다.
+        token_scope=config.hook.token_scope,
         label_to_imagenet=imagenet_label_map_for(config.val_dataset_spec.dataset_type),
     )
     print_intervention_curve_summary(intervention_records, metric="js_divergence")
