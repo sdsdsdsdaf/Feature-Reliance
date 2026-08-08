@@ -1,0 +1,65 @@
+제안 방법 — frozen ViT · frozen SAE 위에서 gain α만 학습
+검증 기준: Model/intervention.py · Model/gain_basis.py · Model/sae_runtime.py
+           Model/adacontrast.py · Model/tta_runner.py
+
+
+① 공유 경로 — weak·strong 두 view가 "같은 α로" 이 경로를 그대로 통과한다
+═══════════════════════════════════════════════════════════════════════════════════════════════════
+
+  x ─┬─▶ weak aug ──┐
+     └─▶ strong aug ┴─▶ ViT blk 0-10 ─▶ h ──────────────────▶(+)─▶ ViT blk 11 ─▶ norm→head ─▶ h', logits
+                        frozen/no_grad  │                     ▲    frozen         frozen
+                                        │                     │    grad 통과
+                                        ▼                     │
+                                  SAE encoder                 │ Δh
+                                     frozen                   │
+                                        │                     │
+                                        ▼                     │
+                                        z                     │
+                                        │                     │
+                                        ▼                     │
+                                  (α-1) ⊙ z ─▶ W_dec^T ─▶ ⊙ sd┘
+                                        ▲       frozen    역정규화
+                                        │
+                                   ┌────┴─────┐
+                                   │    α     │   ★ 유일한 학습 파라미터 (init = 1, α >= 0)
+                                   └──────────┘   α = 1  ⟹  Δh = 0  (비트 동일 no-op)
+
+  · 개입은 patch 토큰에만 더한다. prefix(CLS 1개)는 손대지 않고 그대로 통과한다.
+  · ViT-B/16은 블록이 12개(0-11)다. hook_block=10 이므로 하류는 blk 11 하나뿐이다.
+  · ⊙ sd 는 역정규화다. 전체 denorm 은 (x * sd + mu) 인데 차분이라 + mu 가 소거되고 * sd 만 남는다.
+  · z 는 no_grad 로 뽑은 상수다. 학습되는 것은 z 가 아니라 그 앞에 붙는 α 뿐이다.
+
+
+② 손실 조립 — weak가 pseudo-label을 만들고 strong이 그걸 맞춘다
+═══════════════════════════════════════════════════════════════════════════════════════════════════
+
+  weak view          ┌────────────────┐      ┌────────────────┐
+  h'w, logits_w ────▶│ memory bank    │─────▶│ k-NN soft vote │──▶ ŷ ──┐
+                     │ 클래스 균형 큐 │      └────────────────┘        │
+                     └────────────────┘                                │
+                                                                       ▼
+                                                     ┌──────────────────────────────────────────┐
+  strong view                                        │ L_pseudo = CE( logits_s , ŷ )            │
+  h's, logits_s ────────────────────────────────────▶│ L_ctr    = InfoNCE( n(h's) , n(h'w) )    │
+                                                     │            같은 ŷ 는 negative 에서 제외  │
+                                                     │ L_div    (옵션)                          │
+                                                     └──────────────────────────────────────────┘
+                                                                       │
+                                        ┌────────────┐                 │
+                                        │     α      │◀╌╌ ∂L/∂α ╌╌╌╌╌╌─┘
+                                        └────────────┘   frozen 모듈을 통과해 흐른다
+                                                         (grad_x = W^T · grad_y)
+
+  · weak 쪽도 개입은 받는다. 다만 detach 되어 gradient 는 흐르지 않는다.
+  · bank 가 비면 softmax(logits_w) 자기예측으로 폴백한다 → buffer = 0 이 곧 in-batch 경로(실험 6).
+  · 거리 공간은 { h' | z | logit } 설정값이고 기본은 h' 다 (실험 4B 의 ablation 축).
+  · projector 는 없다. 정규화한 h' 에서 바로 InfoNCE 를 잰다.
+  · n(·) 은 L2 정규화다.
+
+
+학습 파라미터 불변식
+═══════════════════════════════════════════════════════════════════════════════════════════════════
+
+  trainable = [n for n, p in module.named_parameters() if p.requires_grad]
+  assert trainable == ["gain"]

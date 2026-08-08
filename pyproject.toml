@@ -1,0 +1,22 @@
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = ["third_party", "outputs", "data", "Cache", "*.ipynb"]
+
+[tool.ruff.lint]
+# pyflakes only. Style rules (E/W/I) are deliberately off: the pre-existing
+# ~15k LOC would need a full reformat, which conflicts with parallel sessions
+# and destroys git blame. See docs/plans/contracts/phase0.md (T0.2).
+select = ["F"]
+ignore = ["F401"]  # re-exports in __init__.py; use per-file noqa where it matters
+
+[tool.ruff.lint.per-file-ignores]
+# Pre-existing offenders, recorded 2026-08-05 as a baseline so the gate is green
+# for new code. All are duplicate imports or shadowed defs in files predating
+# this plan; none are undefined names (F821). Not fixed here because T0.2 is
+# scoped to new paths and these files are being edited by other sessions.
+# Drop an entry the next time its file is touched for real work.
+"Utils/Dataset.py" = ["F811"]
+"Utils/metric.py" = ["F811"]
+"Utils/train_utils.py" = ["F811", "F841"]
+"Utils/utils.py" = ["F811"]

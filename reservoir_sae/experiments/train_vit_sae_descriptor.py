@@ -73,7 +73,36 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--epochs", type=int, default=350)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument(
+        "--lr",
+        type=float,
+        default=4e-4,
+        help="PatchSAE 참조 구현 기본값(tasks/train_sae_vit.py --lr 0.0004)에 맞춘 값. 이전 기본값은 1e-4였다.",
+    )
+    parser.add_argument(
+        "--lr-warmup-steps",
+        type=int,
+        default=500,
+        help="constant-with-warmup 스텝 수. PatchSAE 참조 구현과 동일. 0이면 warmup 없이 고정 lr.",
+    )
+    parser.add_argument(
+        "--l1-reg",
+        type=float,
+        default=2.4e-3,
+        help=(
+            "L1 계수. PatchSAE의 8e-5는 재구성 항을 토큰별 ||x||2로 나누는 규약에서 나온 값이라 "
+            "그 규약에서는 활성 스케일과 무관하다. 우리는 F.mse_loss(나누지 않음)를 쓰므로 "
+            "||x - b_dec||2 (정규화 토큰 실측 30.25)를 곱해 환산했다: 30.25 x 8e-5 = 2.4e-3. "
+            "이전 기본값은 3e-5로 여기서 약 80배 작았다."
+        ),
+    )
+    parser.add_argument("--expansion", type=int, default=32)
+    parser.add_argument(
+        "--bias-init-geom-max-iter",
+        type=int,
+        default=10,
+        help="Weiszfeld 반복 1회마다 ViT 전체 패스가 다시 돈다. 이전 기본값 100은 학습보다 오래 걸렸다.",
+    )
     parser.add_argument(
         "--device",
         default="cuda",
@@ -281,15 +310,16 @@ def build_sae_config(args: argparse.Namespace) -> SAEExperimentConfig:
 
     config.optim_config.epochs = int(args.epochs)
     config.optim_config.lr = float(args.lr)
+    config.optim_config.lr_warmup_steps = int(args.lr_warmup_steps)
     config.optim_config.weight_decay = 0.0
     config.optim_config.use_amp = str(config.extraction_config.device).startswith("cuda")
 
-    config.sae.expansion = 32
+    config.sae.expansion = int(args.expansion)
     config.sae.dec_bias_mode = "geom"
     config.sae.active_threshold = 0.2
-    config.sae.l1_reg = 3e-5
+    config.sae.l1_reg = float(args.l1_reg)
     config.sae.batch_size = 7096
-    config.sae.bias_init_geom_max_iter = 100
+    config.sae.bias_init_geom_max_iter = int(args.bias_init_geom_max_iter)
     config.sae.bias_init_geom_tol = 1e-5
     config.sae.model_compile = True
     config.sae.amp_dtype = "bfloat16"

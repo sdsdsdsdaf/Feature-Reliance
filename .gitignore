@@ -18,8 +18,15 @@ third_party/
 
 # --- 참고 논문 PDF (재다운로드 가능, 히스토리에서 제거됨) ---
 paper/refer/
+paper/refer/*.pdf
+paper/refer/*.PDF
+paper/summary/
+paper/summary/*.md
 
 # --- 에디터 / 툴 ---
 .vscode/
 .agents/
 .codex/
+.claude
+
+CLAUDE.md
